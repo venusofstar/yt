@@ -1,15 +1,26 @@
 import express from "express"
-import { exec } from "child_process"
+import { execFile } from "child_process"
 
 const app = express()
+
+app.get("/", (req, res) => {
+  res.send("YT-DLP BACKEND OK")
+})
 
 app.get("/m3u8/:id", (req, res) => {
   const id = req.params.id
 
-  const cmd = `yt-dlp -f best --hls-use-mpegts -g https://www.youtube.com/watch?v=${id}`
+  const args = [
+    "-f", "best",
+    "--no-check-certificate",
+    "--no-warnings",
+    "-g",
+    `https://www.youtube.com/watch?v=${id}`
+  ]
 
-  exec(cmd, { maxBuffer: 1024 * 1024 }, (err, stdout) => {
+  execFile("yt-dlp", args, { timeout: 20000 }, (err, stdout, stderr) => {
     if (err || !stdout) {
+      console.error("yt-dlp error:", stderr)
       return res.status(500).send("yt-dlp failed")
     }
 
@@ -23,6 +34,4 @@ ${streamUrl}`)
   })
 })
 
-app.listen(3000, () => {
-  console.log("yt-dlp backend running on port 3000")
-})
+app.listen(3000, () => console.log("Backend running"))
