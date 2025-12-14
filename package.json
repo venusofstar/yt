@@ -1,5 +1,5 @@
 {
-  "name": "yt-m3u8-backend",
+  "name": "yt-m3u8-ph",
   "type": "module",
   "dependencies": {
     "express": "^4.19.2"
