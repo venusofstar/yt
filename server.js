@@ -1,17 +1,7 @@
 import express from "express";
-import { request, Agent } from "undici";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-/* ==========================
-   HTTP AGENT (KEEP-ALIVE)
-========================== */
-const agent = new Agent({
-  keepAliveTimeout: 60_000,
-  keepAliveMaxTimeout: 120_000,
-  connections: 50,
-});
 
 /* ==========================
    SOURCE MPDs
@@ -24,61 +14,61 @@ const SOURCES = {
 const BASE_ORIGIN = "http://143.44.136.67:6060";
 
 /* ==========================
-   COMMON FETCH FUNCTION
+   COMMON PROXY
 ========================== */
-async function proxyRequest(targetUrl, req, res) {
+async function proxyRequest(url, req, res) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
   try {
-    const { statusCode, headers, body } = await request(targetUrl, {
-      method: "GET",
+    const upstream = await fetch(url, {
       headers: {
         "user-agent": req.headers["user-agent"] || "Mozilla/5.0",
         "referer": "http://143.44.136.67/",
-        "range": req.headers.range || undefined,
+        "range": req.headers.range,
       },
-      dispatcher: agent,
       signal: controller.signal,
     });
 
-    res.status(statusCode);
+    res.status(upstream.status);
 
-    for (const [key, value] of Object.entries(headers)) {
-      if (value) res.setHeader(key, value);
-    }
+    upstream.headers.forEach((v, k) => {
+      res.setHeader(k, v);
+    });
 
-    body.pipe(res);
-  } catch (err) {
-    if (!res.headersSent) {
-      res.status(502).send("Upstream fetch failed");
-    }
+    upstream.body.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          res.write(chunk);
+        },
+        close() {
+          res.end();
+        },
+      })
+    );
+  } catch {
+    if (!res.headersSent) res.status(502).send("Upstream error");
   } finally {
     clearTimeout(timeout);
   }
 }
 
 /* ==========================
-   MPD PROXY
+   MPD
 ========================== */
 app.get("/:channel/manifest.mpd", async (req, res) => {
-  const sourceUrl = SOURCES[req.params.channel];
-  if (!sourceUrl) return res.status(404).send("Channel not found");
-
-  await proxyRequest(sourceUrl, req, res);
+  const src = SOURCES[req.params.channel];
+  if (!src) return res.status(404).send("Channel not found");
+  await proxyRequest(src, req, res);
 });
 
 /* ==========================
-   SEGMENT PROXY (.m4s/.mp4)
+   SEGMENTS
 ========================== */
 app.get("*", async (req, res) => {
-  const targetUrl = BASE_ORIGIN + req.originalUrl;
-  await proxyRequest(targetUrl, req, res);
+  await proxyRequest(BASE_ORIGIN + req.originalUrl, req, res);
 });
 
-/* ==========================
-   SERVER
-========================== */
 app.disable("x-powered-by");
 
 app.listen(PORT, () => {
