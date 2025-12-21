@@ -1,4 +1,4 @@
-import express from "express";
+ import express from "express";
 import cors from "cors";
 
 const app = express();
@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 // ==========================
-// SOURCE MPDs
+// DASH MPD SOURCES
 // ==========================
 const SOURCES = {
   nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1",
@@ -15,7 +15,7 @@ const SOURCES = {
 };
 
 // ==========================
-// MPD PROXY
+// MPD PROXY ROUTE
 // ==========================
 app.get("/:channel/manifest.mpd", async (req, res) => {
   const sourceUrl = SOURCES[req.params.channel];
@@ -25,7 +25,7 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
     const upstream = await fetch(sourceUrl, {
       headers: {
         "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-        "Referer": "http://143.44.136.67/",
+        "Referer": "http://143.44.136.67/"
       }
     });
 
@@ -33,7 +33,7 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
     upstream.headers.forEach((v, k) => res.setHeader(k, v));
     res.setHeader("Content-Type", "application/dash+xml");
 
-    upstream.body.pipeTo(
+    await upstream.body.pipeTo(
       new WritableStream({
         write(chunk) {
           res.write(chunk);
@@ -44,16 +44,17 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
       })
     );
   } catch (err) {
-    console.error(err);
+    console.error("MPD error:", err);
     res.sendStatus(502);
   }
 });
 
 // ==========================
-// SEGMENT PROXY
+// SEGMENT + INIT + KEY PROXY
+// (THIS FIXES KODI 404 ISSUE)
 // ==========================
-app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
-  const targetUrl = "http://143.44.136.67:6060/" + req.params[0];
+app.get("/*", async (req, res) => {
+  const targetUrl = "http://143.44.136.67:6060" + req.originalUrl;
 
   try {
     const upstream = await fetch(targetUrl, {
@@ -66,7 +67,8 @@ app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
 
     res.status(upstream.status);
     upstream.headers.forEach((v, k) => res.setHeader(k, v));
-    upstream.body.pipeTo(
+
+    await upstream.body.pipeTo(
       new WritableStream({
         write(chunk) {
           res.write(chunk);
@@ -77,7 +79,7 @@ app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
       })
     );
   } catch (err) {
-    console.error(err);
+    console.error("SEGMENT error:", err);
     res.sendStatus(404);
   }
 });
