@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
 
 const app = express();
@@ -34,7 +33,16 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
     upstream.headers.forEach((v, k) => res.setHeader(k, v));
     res.setHeader("Content-Type", "application/dash+xml");
 
-    upstream.body.pipe(res);
+    upstream.body.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          res.write(chunk);
+        },
+        close() {
+          res.end();
+        }
+      })
+    );
   } catch (err) {
     console.error(err);
     res.sendStatus(502);
@@ -42,7 +50,7 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
 });
 
 // ==========================
-// SEGMENT PROXY (.m4s / .mp4 / init)
+// SEGMENT PROXY
 // ==========================
 app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
   const targetUrl = "http://143.44.136.67:6060/" + req.params[0];
@@ -58,7 +66,16 @@ app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
 
     res.status(upstream.status);
     upstream.headers.forEach((v, k) => res.setHeader(k, v));
-    upstream.body.pipe(res);
+    upstream.body.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          res.write(chunk);
+        },
+        close() {
+          res.end();
+        }
+      })
+    );
   } catch (err) {
     console.error(err);
     res.sendStatus(404);
