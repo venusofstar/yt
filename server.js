@@ -1,58 +1,70 @@
-
 import express from "express";
 import fetch from "node-fetch";
+import cors from "cors";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use(cors());
 
 // ==========================
 // SOURCE MPDs
 // ==========================
 const SOURCES = {
-nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1",
-nba2: "http://143.44.136.67:6060/001/2/ch00000090990000001286/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1"
+  nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1",
+  nba2: "http://143.44.136.67:6060/001/2/ch00000090990000001286/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1"
 };
 
 // ==========================
-// Proxy MPD
+// MPD PROXY
 // ==========================
 app.get("/:channel/manifest.mpd", async (req, res) => {
-const sourceUrl = SOURCES[req.params.channel];
-if (!sourceUrl) return res.status(404).send("Channel not found");
+  const sourceUrl = SOURCES[req.params.channel];
+  if (!sourceUrl) return res.sendStatus(404);
 
-try {
-const response = await fetch(sourceUrl, {
-headers: {
-"User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-"Referer": "http://143.44.136.67/",
-},
-});
-res.set("Content-Type", "application/dash+xml");
-response.body.pipe(res);
-} catch (err) {
-res.status(500).send("MPD fetch error");
-}
+  try {
+    const upstream = await fetch(sourceUrl, {
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+        "Referer": "http://143.44.136.67/",
+      }
+    });
+
+    res.status(upstream.status);
+    upstream.headers.forEach((v, k) => res.setHeader(k, v));
+    res.setHeader("Content-Type", "application/dash+xml");
+
+    upstream.body.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.sendStatus(502);
+  }
 });
 
 // ==========================
-// Proxy all segments (.m4s, .mp4)
+// SEGMENT PROXY (.m4s / .mp4 / init)
 // ==========================
-app.get("/*", async (req, res) => {
-const targetUrl = "http://143.44.136.67:6060" + req.originalUrl;
+app.get(/^\/(.*\.(m4s|mp4))$/, async (req, res) => {
+  const targetUrl = "http://143.44.136.67:6060/" + req.params[0];
 
-try {
-const response = await fetch(targetUrl, {
-headers: {
-"User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-"Referer": "http://143.44.136.67/",
-},
-});
-response.body.pipe(res);
-} catch (err) {
-res.status(404).send("Segment not found");
-}
+  try {
+    const upstream = await fetch(targetUrl, {
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+        "Referer": "http://143.44.136.67/",
+        "Range": req.headers.range || ""
+      }
+    });
+
+    res.status(upstream.status);
+    upstream.headers.forEach((v, k) => res.setHeader(k, v));
+    upstream.body.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.sendStatus(404);
+  }
 });
 
 app.listen(PORT, () => {
-console.log("MPD restream running on port", PORT);
+  console.log(`✅ DASH proxy running on port ${PORT}`);
 });
