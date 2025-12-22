@@ -4,12 +4,11 @@ import cors from "cors";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Keep RAW body (required for DRM license POST)
-app.use(express.raw({ type: "*/*" }));
 app.use(cors());
+app.use(express.raw({ type: "*/*" }));
 
 // ==========================
-// OPTIONAL CHANNEL SHORTCUTS
+// CHANNEL SHORTCUT
 // ==========================
 const SOURCES = {
   nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd",
@@ -17,7 +16,7 @@ const SOURCES = {
 };
 
 // ==========================
-// MPD SHORT URL
+// MPD SHORT PATH
 // ==========================
 app.get("/:channel/manifest.mpd", async (req, res) => {
   const src = SOURCES[req.params.channel];
@@ -25,7 +24,10 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
 
   try {
     const r = await fetch(src, {
-      headers: req.headers
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+        "Referer": "http://143.44.136.67/"
+      }
     });
 
     res.status(r.status);
@@ -40,15 +42,21 @@ app.get("/:channel/manifest.mpd", async (req, res) => {
 });
 
 // ==========================
-// LICENSE + SEGMENTS + EVERYTHING
+// EVERYTHING ELSE (SEGMENTS / LICENSE / INIT)
+// MUST BE LAST
 // ==========================
-app.all("/*", async (req, res) => {
-  const targetUrl = "http://143.44.136.67:6060" + req.originalUrl;
+app.all("*", async (req, res) => {
+  const target = "http://143.44.136.67:6060" + req.originalUrl;
 
   try {
-    const r = await fetch(targetUrl, {
+    const r = await fetch(target, {
       method: req.method,
-      headers: req.headers,
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
+        "Referer": "http://143.44.136.67/",
+        "Range": req.headers.range || "",
+        "Content-Type": req.headers["content-type"]
+      },
       body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body
     });
 
@@ -64,5 +72,5 @@ app.all("/*", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Transparent proxy running on port ${PORT}`);
+  console.log(`✅ Proxy running on port ${PORT}`);
 });
