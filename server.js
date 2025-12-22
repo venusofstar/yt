@@ -11,8 +11,8 @@ app.use(express.raw({ type: "*/*" }));
 // CHANNEL SHORTCUT
 // ==========================
 const SOURCES = {
-  nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd",
-  nba2: "http://143.44.136.67:6060/001/2/ch00000090990000001286/manifest.mpd"
+  nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1",
+  nba2: "http://143.44.136.67:6060/001/2/ch00000090990000001286/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1"
 };
 
 // ==========================
