@@ -3,7 +3,7 @@ import express from "express";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const ORIGIN = "http://143.44.136.67:6060";
+const ORIGIN = "http://136.239.158.18:6610";
 const MPD_PATH = "/001/2/ch00000090990000001093/manifest.mpd";
 const MPD_QUERY = "JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1";
 
