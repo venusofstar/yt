@@ -1,76 +1,43 @@
 import express from "express";
-import cors from "cors";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.raw({ type: "*/*" }));
+// ORIGINAL MPD (FULL PARAMS, DO NOT CHANGE)
+const ORIGIN_MPD =
+  "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd" +
+  "?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1";
 
-// ==========================
-// CHANNEL SHORTCUT
-// ==========================
-const SOURCES = {
-  nba1: "http://143.44.136.67:6060/001/2/ch00000090990000001093/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1",
-  nba2: "http://143.44.136.67:6060/001/2/ch00000090990000001286/manifest.mpd?JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1"
-};
-
-// ==========================
-// MPD SHORT PATH
-// ==========================
-app.get("/:channel/manifest.mpd", async (req, res) => {
-  const src = SOURCES[req.params.channel];
-  if (!src) return res.sendStatus(404);
-
+app.get("/", async (req, res) => {
   try {
-    const r = await fetch(src, {
+    const originRes = await fetch(ORIGIN_MPD, {
       headers: {
         "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-        "Referer": "http://143.44.136.67/"
+        "Accept": "*/*",
+        "Referer": "http://143.44.136.67:6060/",
+        "Origin": "http://143.44.136.67:6060"
       }
     });
 
-    res.status(r.status);
-    r.headers.forEach((v, k) => res.setHeader(k, v));
-    r.body.pipeTo(new WritableStream({
-      write: c => res.write(c),
-      close: () => res.end()
-    }));
-  } catch {
-    res.sendStatus(502);
-  }
-});
+    if (!originRes.ok) {
+      return res.status(502).send("Origin MPD error");
+    }
 
-// ==========================
-// EVERYTHING ELSE (SEGMENTS / LICENSE / INIT)
-// MUST BE LAST
-// ==========================
-app.all("*", async (req, res) => {
-  const target = "http://143.44.136.67:6060" + req.originalUrl;
+    const mpd = await originRes.text();
 
-  try {
-    const r = await fetch(target, {
-      method: req.method,
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "Mozilla/5.0",
-        "Referer": "http://143.44.136.67/",
-        "Range": req.headers.range || "",
-        "Content-Type": req.headers["content-type"]
-      },
-      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body
+    res.set({
+      "Content-Type": "application/dash+xml; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-store"
     });
 
-    res.status(r.status);
-    r.headers.forEach((v, k) => res.setHeader(k, v));
-    r.body.pipeTo(new WritableStream({
-      write: c => res.write(c),
-      close: () => res.end()
-    }));
-  } catch {
-    res.sendStatus(404);
+    res.send(mpd);
+
+  } catch (err) {
+    res.status(500).send("Proxy error:\n" + err.toString());
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Proxy running on port ${PORT}`);
+  console.log("MPD proxy running on port", PORT);
 });
