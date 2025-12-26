@@ -1,62 +1,111 @@
-import express from "express";
+const express = require("express");
+const cors = require("cors");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const ORIGIN = "http://136.239.158.18:6610";
-const MPD_PATH = "/001/2/ch00000090990000001179/manifest.mpd";
-const MPD_QUERY = "JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1";
+app.use(cors());
+app.use(express.raw({ type: "*/*" }));
 
-const ORIGIN_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Android)",
-  "Accept": "*/*",
-  "Referer": ORIGIN + "/",
-  "Origin": ORIGIN
-};
+// =========================
+// ORIGIN ROTATION
+// =========================
+const ORIGINS = [
+  "http://136.239.158.18:6610",
+  "http://136.239.158.20:6610",
+  "http://136.239.158.30:6610",
+  "http://136.239.173.3:6610",
+  "http://136.158.97.2:6610",
+  "http://136.239.173.10:6610",
+  "http://136.239.158.10:6610",
+  "http://136.239.159.20:6610"
+];
 
-// ===== MPD =====
-app.get("/", async (req, res) => {
+let rotateIndex = 0;
+function getOrigin() {
+  const origin = ORIGINS[rotateIndex];
+  rotateIndex = (rotateIndex + 1) % ORIGINS.length;
+  return origin;
+}
+
+// =========================
+// FAST AUTH ROTATION
+// =========================
+function rotateStartNumber() {
+  const base = 46489952;
+  const step = 6;
+  return base + Math.floor(Math.random() * 100000) * step;
+}
+
+function rotateIAS() {
+  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+}
+
+function rotateUserSession() {
+  return Math.floor(Math.random() * 1e15).toString();
+}
+
+// =========================
+// HOME
+// =========================
+app.get("/", (req, res) => {
+  res.send("✅ MPD → MPD Proxy is running");
+});
+
+// =========================
+// MPD → MPD FULL PROXY
+// =========================
+app.get("/:channelId/manifest.mpd", async (req, res) => {
+  const { channelId } = req.params;
+  const origin = getOrigin();
+
+  const targetURL =
+    `${origin}/001/2/ch0000009099000000${channelId}/manifest.mpd` +
+    `?JITPDRMType=Widevine` +
+    `&virtualDomain=001.live_hls.zte.com` +
+    `&m4s_min=1` +
+    `&NeedJITP=1` +
+    `&isjitp=0` +
+    `&startNumber=${rotateStartNumber()}` +
+    `&filedura=6` +
+    `&ispcode=55` +
+    `&IASHttpSessionId=${rotateIAS()}` +
+    `&usersessionid=${rotateUserSession()}`;
+
   try {
-    const mpdUrl = `${ORIGIN}${MPD_PATH}?${MPD_QUERY}`;
-    const r = await fetch(mpdUrl, { headers: ORIGIN_HEADERS });
-    const mpd = await r.text();
+    console.log("📡 Fetching MPD:", targetURL);
 
+    const upstream = await fetch(targetURL, {
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "OTT",
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+      }
+    });
+
+    res.status(upstream.status);
+
+    // DASH SAFE HEADERS
     res.set({
       "Content-Type": "application/dash+xml",
       "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0"
     });
 
-    res.send(mpd);
-  } catch {
-    res.status(502).send("MPD fetch failed");
+    upstream.body.pipe(res);
+
+  } catch (err) {
+    console.error("❌ MPD Proxy Error:", err.message);
+    res.status(502).send("MPD upstream error");
   }
 });
 
-// ===== SEGMENTS (CRITICAL FIX) =====
-app.get("/001/2/*", async (req, res) => {
-  try {
-    // 🔑 FORCE REQUIRED QUERY PARAMS
-    const targetUrl = ORIGIN + req.path + "?" + MPD_QUERY;
-
-    const r = await fetch(targetUrl, { headers: ORIGIN_HEADERS });
-
-    if (!r.ok) {
-      return res.sendStatus(502);
-    }
-
-    res.set({
-      "Content-Type": r.headers.get("content-type") || "application/octet-stream",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "no-store"
-    });
-
-    r.body.pipe(res);
-  } catch {
-    res.sendStatus(502);
-  }
-});
-
+// =========================
+// START SERVER
+// =========================
 app.listen(PORT, () => {
-  console.log("DASH proxy running on", PORT);
+  console.log(`✅ MPD Proxy running on port ${PORT}`);
 });
