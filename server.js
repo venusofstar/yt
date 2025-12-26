@@ -4,18 +4,13 @@ const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const http = require("http");
+const AbortController = require("abort-controller");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* =========================
-   CONFIG
-========================= */
-
-const STREAM_DELAY_MS = 5000;
-
-/* =========================
-   ORIGINS
+   CONSTANTS
 ========================= */
 
 const ORIGINS = [
@@ -29,34 +24,11 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-let originIndex = 0;
-const getOrigin = () => {
-  const o = ORIGINS[originIndex];
-  originIndex = (originIndex + 1) % ORIGINS.length;
-  return o;
-};
-
-/* =========================
-   ROTATION HELPERS
-========================= */
-
 const BASE_START = 46489952;
 const STEP = 6;
 
-const rotateStartNumber = () =>
-  BASE_START + ((Math.random() * 100000) | 0) * STEP;
-
-const rotateIAS = () =>
-  `RR${Date.now()}${Math.random().toString(36).slice(2, 10)}`;
-
-const rotateUserSession = () =>
-  (Math.random() * 1e15).toFixed(0);
-
-/* =========================
-   UTIL
-========================= */
-
-const delay = ms => new Promise(res => setTimeout(res, ms));
+const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
+const MPD_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
    KEEP-ALIVE AGENT
@@ -64,17 +36,10 @@ const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const agent = new http.Agent({
   keepAlive: true,
-  maxSockets: 256,
-  maxFreeSockets: 64,
-  timeout: 60000
+  maxSockets: 512,
+  maxFreeSockets: 128,
+  timeout: 30000
 });
-
-/* =========================
-   REGEX
-========================= */
-
-const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
-const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
    MIDDLEWARE
@@ -83,35 +48,39 @@ const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 app.use(cors({ origin: "*" }));
 
 /* =========================
-   HOME
+   ROTATORS (FAST & STABLE)
+========================= */
+
+let originIndex = 0;
+const getOrigin = () => ORIGINS[(originIndex++ % ORIGINS.length)];
+
+const rotateStartNumber = () =>
+  BASE_START + (Math.floor(Date.now() / 6000) % 100000) * STEP;
+
+const rotateIAS = () => `RR${Date.now().toString(36)}`;
+const rotateUserSession = () => Math.random().toString().slice(2);
+
+/* =========================
+   ROUTES
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD → MPD Proxy (5s delayed) running");
+  res.send("✅ DASH MPD Proxy – Ultra Fast Mode");
 });
-
-/* =========================
-   DASH PROXY
-========================= */
 
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const origin = getOrigin();
-  const isMPD = path.endsWith(".mpd");
-
-  // ⏱️ Delay MEDIA segments only
-  if (!isMPD) {
-    await delay(STREAM_DELAY_MS);
-  }
 
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
 
+  /* 🔥 m4s_min BYPASS */
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +
+    `&m4s_min=1` +                 // 🚀 bypassed
     `&NeedJITP=1` +
     `&isjitp=0` +
     `&startNumber=${rotateStartNumber()}` +
@@ -125,9 +94,13 @@ app.get("/:channelId/*", async (req, res) => {
       ? `${upstreamBase}${path}&${authParams}`
       : `${upstreamBase}${path}?${authParams}`;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
   try {
     const upstream = await fetch(targetURL, {
       agent,
+      signal: controller.signal,
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
         "Accept": "*/*",
@@ -136,42 +109,50 @@ app.get("/:channelId/*", async (req, res) => {
       }
     });
 
+    clearTimeout(timeout);
+
     if (!upstream.ok) {
-      return res.sendStatus(upstream.status);
+      res.sendStatus(upstream.status);
+      return;
     }
 
-    /* ===== MPD ===== */
-    if (isMPD) {
-      let mpd = await upstream.text();
+    /* =========================
+       MPD FAST REWRITE
+    ========================= */
 
+    if (path.endsWith(".mpd")) {
+      let mpd = await upstream.text();
       const proxyBaseURL =
         `${req.protocol}://${req.get("host")}/${channelId}/`;
 
       mpd = mpd
         .replace(BASEURL_REGEX, "")
-        .replace(MPD_TAG_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
+        .replace(MPD_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
+        "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*"
       });
 
-      return res.send(mpd);
+      res.send(mpd);
+      return;
     }
 
-    /* ===== SEGMENTS ===== */
-    res.status(upstream.status);
-    res.set({
+    /* =========================
+       SEGMENT STREAM
+    ========================= */
+
+    res.writeHead(upstream.status, {
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Connection": "keep-alive"
     });
 
     upstream.body.pipe(res);
 
-  } catch (err) {
-    console.error("❌ DASH Proxy Error:", err);
+  } catch (e) {
+    console.error("❌ Proxy Error:", e.message);
     res.sendStatus(502);
   }
 });
@@ -180,6 +161,6 @@ app.get("/:channelId/*", async (req, res) => {
    START
 ========================= */
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+app.listen(PORT, () =>
+  console.log(`🚀 DASH Proxy running on port ${PORT}`)
+);
