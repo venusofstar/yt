@@ -1,12 +1,30 @@
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
+const http = require("http");
+const https = require("https");
+const { pipeline } = require("stream");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.raw({ type: "*/*" }));
+
+// =========================
+// KEEP-ALIVE AGENTS (CRITICAL)
+// =========================
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  keepAliveMsecs: 30000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  keepAliveMsecs: 30000
+});
 
 // =========================
 // ORIGIN ROTATION
@@ -23,67 +41,30 @@ const ORIGINS = [
 ];
 
 let originIndex = 0;
-function getOrigin() {
-  const o = ORIGINS[originIndex];
-  originIndex = (originIndex + 1) % ORIGINS.length;
-  return o;
-}
+const getOrigin = () =>
+  ORIGINS[(originIndex = (originIndex + 1) % ORIGINS.length)];
 
 // =========================
 // AUTH ROTATION
 // =========================
-function rotateStartNumber() {
-  const base = 46489952;
-  const step = 6;
-  return base + Math.floor(Math.random() * 100000) * step;
-}
+const rotateStartNumber = () =>
+  46489952 + Math.floor(Math.random() * 100000) * 6;
 
-function rotateIAS() {
-  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
-}
+const rotateIAS = () =>
+  "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
 
-function rotateUserSession() {
-  return Math.floor(Math.random() * 1e15).toString();
-}
-
-// =========================
-// SEGMENT RAM CACHE
-// =========================
-const segmentCache = new Map();
-const MAX_CACHE_ITEMS = 500;        // safe limit
-const CACHE_TTL = 15 * 1000;        // 15 seconds
-
-function setCache(key, data, headers) {
-  if (segmentCache.size >= MAX_CACHE_ITEMS) {
-    const firstKey = segmentCache.keys().next().value;
-    segmentCache.delete(firstKey);
-  }
-  segmentCache.set(key, {
-    data,
-    headers,
-    time: Date.now()
-  });
-}
-
-function getCache(key) {
-  const item = segmentCache.get(key);
-  if (!item) return null;
-  if (Date.now() - item.time > CACHE_TTL) {
-    segmentCache.delete(key);
-    return null;
-  }
-  return item;
-}
+const rotateUserSession = () =>
+  Math.floor(Math.random() * 1e15).toString();
 
 // =========================
 // HOME
 // =========================
-app.get("/", (req, res) => {
-  res.send("✅ DASH Proxy with RAM Cache is running");
+app.get("/", (_, res) => {
+  res.send("✅ DASH MPD → MPD Proxy (BUFFER OPTIMIZED)");
 });
 
 // =========================
-// FULL DASH PROXY
+// DASH PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -93,7 +74,7 @@ app.get("/:channelId/*", async (req, res) => {
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  const auth =
+  const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
     `&m4s_min=1` +
@@ -107,28 +88,18 @@ app.get("/:channelId/*", async (req, res) => {
 
   const targetURL =
     path.includes("?")
-      ? `${upstreamBase}${path}&${auth}`
-      : `${upstreamBase}${path}?${auth}`;
-
-  const cacheKey = `${channelId}:${path}`;
+      ? `${upstreamBase}${path}&${authParams}`
+      : `${upstreamBase}${path}?${authParams}`;
 
   try {
-    // =========================
-    // SEGMENT CACHE HIT
-    // =========================
-    if (!path.endsWith(".mpd")) {
-      const cached = getCache(cacheKey);
-      if (cached) {
-        res.set(cached.headers);
-        return res.send(cached.data);
-      }
-    }
-
     const upstream = await fetch(targetURL, {
+      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*"
-      }
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+      },
+      timeout: 15000
     });
 
     if (!upstream.ok) {
@@ -136,7 +107,7 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // MPD (NO CACHE)
+    // MPD HANDLING
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
@@ -152,7 +123,8 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
         "Access-Control-Allow-Origin": "*"
       });
 
@@ -160,23 +132,22 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // SEGMENTS (.m4s / .mp4)
+    // SEGMENTS (SMOOTH STREAM)
     // =========================
-    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.status(200);
+    res.set({
+      "Content-Type": "video/mp4",
+      "Cache-Control": "public, max-age=1",
+      "Access-Control-Allow-Origin": "*",
+      "Connection": "keep-alive"
+    });
 
-    const headers = {
-      "Content-Type": upstream.headers.get("content-type") || "video/iso.segment",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
-    };
-
-    setCache(cacheKey, buffer, headers);
-
-    res.set(headers);
-    res.send(buffer);
+    pipeline(upstream.body, res, err => {
+      if (err) res.destroy();
+    });
 
   } catch (err) {
-    console.error("❌ DASH error:", err.message);
+    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
@@ -185,5 +156,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`🚀 DASH Proxy with RAM cache running on ${PORT}`);
+  console.log(`✅ Optimized DASH proxy running on port ${PORT}`);
 });
