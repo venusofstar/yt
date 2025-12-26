@@ -4,13 +4,12 @@ const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const http = require("http");
-const AbortController = require("abort-controller");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* =========================
-   CONSTANTS
+   GLOBALS / CONSTANTS
 ========================= */
 
 const ORIGINS = [
@@ -28,15 +27,15 @@ const BASE_START = 46489952;
 const STEP = 6;
 
 const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
-const MPD_REGEX = /<MPD([^>]*)>/;
+const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
-   KEEP-ALIVE AGENT
+   HTTP KEEP-ALIVE AGENT
 ========================= */
 
 const agent = new http.Agent({
   keepAlive: true,
-  maxSockets: 512,
+  maxSockets: 512,        // faster parallel fetch
   maxFreeSockets: 128,
   timeout: 30000
 });
@@ -48,25 +47,38 @@ const agent = new http.Agent({
 app.use(cors({ origin: "*" }));
 
 /* =========================
-   ROTATORS (FAST & STABLE)
+   ROTATORS (FAST LOAD BYPASS)
 ========================= */
 
 let originIndex = 0;
-const getOrigin = () => ORIGINS[(originIndex++ % ORIGINS.length)];
+const getOrigin = () => {
+  const o = ORIGINS[originIndex];
+  originIndex = (originIndex + 1) % ORIGINS.length;
+  return o;
+};
 
+/*
+ 🔥 KEY OPTIMIZATION
+ Stable time-based startNumber avoids cold-start delay
+ WITHOUT touching m4s_min
+*/
 const rotateStartNumber = () =>
-  BASE_START + (Math.floor(Date.now() / 6000) % 100000) * STEP;
+  BASE_START + (Math.floor(Date.now() / 6000) * STEP);
 
-const rotateIAS = () => `RR${Date.now().toString(36)}`;
+const rotateIAS = () => `RR${Date.now()}`;
 const rotateUserSession = () => Math.random().toString().slice(2);
 
 /* =========================
-   ROUTES
+   HOME
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD Proxy – Ultra Fast Mode");
+  res.send("✅ DASH MPD Proxy running (m4s_min untouched, fast mode)");
 });
+
+/* =========================
+   DASH PROXY
+========================= */
 
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -76,14 +88,16 @@ app.get("/:channelId/*", async (req, res) => {
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  /* 🔥 m4s_min BYPASS */
+  /*
+   ⚠️ m4s_min=1 IS NOT CHANGED
+  */
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +                 // 🚀 bypassed
+    `&m4s_min=1` +                // 🔒 untouched
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
+    `&startNumber=${rotateStartNumber()}` + // 🚀 bypass delay here
     `&filedura=6` +
     `&ispcode=55` +
     `&IASHttpSessionId=${rotateIAS()}` +
@@ -94,13 +108,9 @@ app.get("/:channelId/*", async (req, res) => {
       ? `${upstreamBase}${path}&${authParams}`
       : `${upstreamBase}${path}?${authParams}`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
   try {
     const upstream = await fetch(targetURL, {
       agent,
-      signal: controller.signal,
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
         "Accept": "*/*",
@@ -109,25 +119,27 @@ app.get("/:channelId/*", async (req, res) => {
       }
     });
 
-    clearTimeout(timeout);
-
     if (!upstream.ok) {
       res.sendStatus(upstream.status);
       return;
     }
 
     /* =========================
-       MPD FAST REWRITE
+       MPD HANDLING
     ========================= */
 
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
+
       const proxyBaseURL =
         `${req.protocol}://${req.get("host")}/${channelId}/`;
 
       mpd = mpd
         .replace(BASEURL_REGEX, "")
-        .replace(MPD_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
+        .replace(
+          MPD_TAG_REGEX,
+          `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
+        );
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -140,7 +152,7 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     /* =========================
-       SEGMENT STREAM
+       SEGMENT STREAMING
     ========================= */
 
     res.writeHead(upstream.status, {
@@ -151,8 +163,8 @@ app.get("/:channelId/*", async (req, res) => {
 
     upstream.body.pipe(res);
 
-  } catch (e) {
-    console.error("❌ Proxy Error:", e.message);
+  } catch (err) {
+    console.error("❌ DASH Proxy Error:", err.message);
     res.sendStatus(502);
   }
 });
@@ -161,6 +173,6 @@ app.get("/:channelId/*", async (req, res) => {
    START
 ========================= */
 
-app.listen(PORT, () =>
-  console.log(`🚀 DASH Proxy running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🚀 Server running FAST (m4s_min untouched)`);
+});
