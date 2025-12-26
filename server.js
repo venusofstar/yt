@@ -9,7 +9,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* =========================
-   GLOBALS / CONSTANTS
+   CONFIG
+========================= */
+
+const STREAM_DELAY_MS = 5000;
+
+/* =========================
+   ORIGINS
 ========================= */
 
 const ORIGINS = [
@@ -23,39 +29,19 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-const BASE_START = 46489952;
-const STEP = 6;
-
-const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
-const MPD_TAG_REGEX = /<MPD([^>]*)>/;
-
-/* =========================
-   HTTP KEEP-ALIVE AGENT
-========================= */
-
-const agent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 256,
-  maxFreeSockets: 64,
-  timeout: 60000
-});
-
-/* =========================
-   MIDDLEWARE
-========================= */
-
-app.use(cors({ origin: "*" }));
-
-/* =========================
-   ROTATORS (FAST)
-========================= */
-
 let originIndex = 0;
 const getOrigin = () => {
   const o = ORIGINS[originIndex];
   originIndex = (originIndex + 1) % ORIGINS.length;
   return o;
 };
+
+/* =========================
+   ROTATION HELPERS
+========================= */
+
+const BASE_START = 46489952;
+const STEP = 6;
 
 const rotateStartNumber = () =>
   BASE_START + ((Math.random() * 100000) | 0) * STEP;
@@ -67,11 +53,41 @@ const rotateUserSession = () =>
   (Math.random() * 1e15).toFixed(0);
 
 /* =========================
+   UTIL
+========================= */
+
+const delay = ms => new Promise(res => setTimeout(res, ms));
+
+/* =========================
+   KEEP-ALIVE AGENT
+========================= */
+
+const agent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 256,
+  maxFreeSockets: 64,
+  timeout: 60000
+});
+
+/* =========================
+   REGEX
+========================= */
+
+const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
+const MPD_TAG_REGEX = /<MPD([^>]*)>/;
+
+/* =========================
+   MIDDLEWARE
+========================= */
+
+app.use(cors({ origin: "*" }));
+
+/* =========================
    HOME
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD → MPD Proxy is running");
+  res.send("✅ DASH MPD → MPD Proxy (5s delayed) running");
 });
 
 /* =========================
@@ -82,6 +98,12 @@ app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const origin = getOrigin();
+  const isMPD = path.endsWith(".mpd");
+
+  // ⏱️ Delay MEDIA segments only
+  if (!isMPD) {
+    await delay(STREAM_DELAY_MS);
+  }
 
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
@@ -115,15 +137,11 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
     if (!upstream.ok) {
-      res.sendStatus(upstream.status);
-      return;
+      return res.sendStatus(upstream.status);
     }
 
-    /* =========================
-       MPD HANDLING
-    ========================= */
-
-    if (path.endsWith(".mpd")) {
+    /* ===== MPD ===== */
+    if (isMPD) {
       let mpd = await upstream.text();
 
       const proxyBaseURL =
@@ -140,14 +158,10 @@ app.get("/:channelId/*", async (req, res) => {
         "Access-Control-Allow-Origin": "*"
       });
 
-      res.send(mpd);
-      return;
+      return res.send(mpd);
     }
 
-    /* =========================
-       SEGMENT STREAMING
-    ========================= */
-
+    /* ===== SEGMENTS ===== */
     res.status(upstream.status);
     res.set({
       "Cache-Control": "no-store",
