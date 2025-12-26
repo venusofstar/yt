@@ -1,12 +1,18 @@
 {
-  "name": "mpd-proxy",
+  "name": "mpd-to-mpd-proxy",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Optimized DASH MPD to MPD proxy with origin rotation",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^2.7.0"
   }
 }
