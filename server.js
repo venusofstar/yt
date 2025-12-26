@@ -57,7 +57,7 @@ const ORIGIN_LEN = ORIGINS.length;
 const getOrigin = () => ORIGINS[(originIndex = (originIndex + 1) % ORIGIN_LEN)];
 
 const rotateStartNumber = () =>
-  BASE_START + ((Date.now() / 2000) | 0) * STEP; // faster prefetch alignment
+  BASE_START + ((Date.now() / 2000) | 0) * STEP;
 
 const rotateIAS = () => `RR${Date.now()}`;
 const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e6 | 0)}`;
@@ -67,97 +67,108 @@ const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD Proxy running (Fast Rotation + Full Stock + ztecid dynamic)");
+  res.send("✅ Ultra-Resilient DASH Proxy Running");
 });
 
 /* =========================
-   DASH PROXY
+   DASH PROXY WITH CONTINUOUS RECOVERY
 ========================= */
 
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
-  const origin = getOrigin();
 
-  const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
-
-  // dynamic ztecid per channel
   const ztecid = `ch0000009099000000${channelId}`;
+  let attempt = 0;
+  const maxAttempts = ORIGINS.length;
 
-  // m4s_min=1 untouched
-  const authParams =
-    `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +
-    `&NeedJITP=1` +
-    `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
-    `&filedura=6` +
-    `&ispcode=55` +
-    `&ztecid=${ztecid}` +
-    `&IASHttpSessionId=${rotateIAS()}` +
-    `&usersessionid=${rotateUserSession()}`;
+  // PassThrough allows continuous streaming
+  const passThrough = new stream.PassThrough();
+  passThrough.pipe(res);
 
-  const targetURL = path.includes("?")
-    ? `${upstreamBase}${path}&${authParams}`
-    : `${upstreamBase}${path}?${authParams}`;
+  const fetchSegment = async () => {
+    const origin = getOrigin();
+    const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  try {
-    const upstream = await fetch(targetURL, {
-      agent,
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*",
-        "Connection": "keep-alive",
-        ...(req.headers.range && { Range: req.headers.range })
-      }
-    });
+    const authParams =
+      `JITPDRMType=Widevine` +
+      `&virtualDomain=001.live_hls.zte.com` +
+      `&m4s_min=1` +                     // untouched
+      `&NeedJITP=1` +
+      `&isjitp=0` +
+      `&startNumber=${rotateStartNumber()}` +
+      `&filedura=6` +
+      `&ispcode=55` +
+      `&ztecid=${ztecid}` +
+      `&IASHttpSessionId=${rotateIAS()}` +
+      `&usersessionid=${rotateUserSession()}`;
 
-    if (!upstream.ok) {
-      res.sendStatus(upstream.status);
-      return;
-    }
+    const targetURL = path.includes("?")
+      ? `${upstreamBase}${path}&${authParams}`
+      : `${upstreamBase}${path}?${authParams}`;
 
-    /* =========================
-       MPD HANDLING
-    ========================== */
-
-    if (path.endsWith(".mpd")) {
-      let mpd = await upstream.text();
-      const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
-
-      mpd = mpd
-        .replace(BASEURL_REGEX, "")
-        .replace(MPD_TAG_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
-
-      res.set({
-        "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
-        "Access-Control-Allow-Origin": "*"
+    try {
+      const upstream = await fetch(targetURL, {
+        agent,
+        headers: {
+          "User-Agent": req.headers["user-agent"] || "OTT",
+          "Accept": "*/*",
+          "Connection": "keep-alive",
+          ...(req.headers.range && { Range: req.headers.range })
+        }
       });
 
-      res.send(mpd);
-      return;
+      if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
+
+      // MPD handling
+      if (path.endsWith(".mpd")) {
+        let mpd = await upstream.text();
+        const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
+
+        mpd = mpd
+          .replace(BASEURL_REGEX, "")
+          .replace(MPD_TAG_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
+
+        res.set({
+          "Content-Type": "application/dash+xml",
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*"
+        });
+
+        passThrough.end(mpd);
+        return;
+      }
+
+      // Pipe segment to PassThrough
+      upstream.body.pipe(passThrough, { end: false });
+      upstream.body.on("end", () => {
+        // Segment finished successfully
+      });
+
+      upstream.body.on("error", async (err) => {
+        console.error("Segment error, retrying...", err.message);
+        await retrySegment();
+      });
+
+    } catch (err) {
+      console.error("Fetch error:", err.message);
+      await retrySegment();
     }
+  };
 
-    /* =========================
-       SEGMENT STREAMING (FULL STOCK)
-    ========================== */
+  const retrySegment = async () => {
+    attempt++;
+    if (attempt <= maxAttempts) {
+      console.log(`🔄 Retrying segment (attempt ${attempt}) with new origin...`);
+      await fetchSegment();
+    } else {
+      console.error("❌ All origins failed for this segment");
+      passThrough.end();
+    }
+  };
 
-    res.writeHead(upstream.status, {
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Connection": "keep-alive"
-    });
-
-    const passThrough = new stream.PassThrough();
-    upstream.body.pipe(passThrough);
-    passThrough.pipe(res);
-
-  } catch (err) {
-    console.error("❌ DASH Proxy Error:", err.message);
-    res.sendStatus(502);
-  }
+  // Start fetching
+  await fetchSegment();
 });
 
 /* =========================
@@ -165,5 +176,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running (Fast Rotation + Full Stock + ztecid dynamic)`);
+  console.log(`🚀 Ultra-Resilient DASH Proxy running (Fast + Full Stock + Auto-Recovery)`);
 });
