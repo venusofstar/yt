@@ -67,26 +67,24 @@ const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ Ultra-Resilient DASH Proxy Running");
+  res.send("✅ DASH MPD Proxy running (Fast + Full Stock + Auto Retry)");
 });
 
 /* =========================
-   DASH PROXY WITH CONTINUOUS RECOVERY
+   DASH PROXY WITH AUTO-RESET
 ========================= */
 
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
 
+  // dynamic ztecid per channel
   const ztecid = `ch0000009099000000${channelId}`;
+
   let attempt = 0;
   const maxAttempts = ORIGINS.length;
 
-  // PassThrough allows continuous streaming
-  const passThrough = new stream.PassThrough();
-  passThrough.pipe(res);
-
-  const fetchSegment = async () => {
+  const fetchUpstream = async () => {
     const origin = getOrigin();
     const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
 
@@ -118,9 +116,12 @@ app.get("/:channelId/*", async (req, res) => {
         }
       });
 
-      if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
+      if (!upstream.ok) throw new Error(`Upstream returned status ${upstream.status}`);
 
-      // MPD handling
+      /* =========================
+         MPD HANDLING
+      ========================== */
+
       if (path.endsWith(".mpd")) {
         let mpd = await upstream.text();
         const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
@@ -135,40 +136,39 @@ app.get("/:channelId/*", async (req, res) => {
           "Access-Control-Allow-Origin": "*"
         });
 
-        passThrough.end(mpd);
+        res.send(mpd);
         return;
       }
 
-      // Pipe segment to PassThrough
-      upstream.body.pipe(passThrough, { end: false });
-      upstream.body.on("end", () => {
-        // Segment finished successfully
+      /* =========================
+         SEGMENT STREAMING
+      ========================== */
+
+      res.writeHead(upstream.status, {
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+        "Connection": "keep-alive"
       });
 
-      upstream.body.on("error", async (err) => {
-        console.error("Segment error, retrying...", err.message);
-        await retrySegment();
-      });
+      const passThrough = new stream.PassThrough();
+      upstream.body.pipe(passThrough);
+      passThrough.pipe(res);
 
     } catch (err) {
-      console.error("Fetch error:", err.message);
-      await retrySegment();
+      attempt++;
+      console.error(`❌ Attempt ${attempt} failed: ${err.message}`);
+
+      if (attempt < maxAttempts) {
+        console.log("🔄 Retrying with new origin...");
+        await fetchUpstream(); // retry with next origin
+      } else {
+        console.error("❌ All origins failed, sending 502");
+        res.sendStatus(502);
+      }
     }
   };
 
-  const retrySegment = async () => {
-    attempt++;
-    if (attempt <= maxAttempts) {
-      console.log(`🔄 Retrying segment (attempt ${attempt}) with new origin...`);
-      await fetchSegment();
-    } else {
-      console.error("❌ All origins failed for this segment");
-      passThrough.end();
-    }
-  };
-
-  // Start fetching
-  await fetchSegment();
+  await fetchUpstream();
 });
 
 /* =========================
@@ -176,5 +176,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Ultra-Resilient DASH Proxy running (Fast + Full Stock + Auto-Recovery)`);
+  console.log(`🚀 Server running (Fast Rotation + Full Stock + Auto Retry enabled)`);
 });
