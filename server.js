@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* =========================
-   GLOBALS / CONSTANTS
+   GLOBALS
 ========================= */
 
 const ORIGINS = [
@@ -30,14 +30,14 @@ const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
 const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
-   HTTP KEEP-ALIVE AGENT
+   FAST KEEP-ALIVE AGENT
 ========================= */
 
 const agent = new http.Agent({
   keepAlive: true,
-  maxSockets: 512,        // faster parallel fetch
-  maxFreeSockets: 128,
-  timeout: 30000
+  maxSockets: 1024,
+  maxFreeSockets: 256,
+  timeout: 25000
 });
 
 /* =========================
@@ -47,33 +47,34 @@ const agent = new http.Agent({
 app.use(cors({ origin: "*" }));
 
 /* =========================
-   ROTATORS (FAST LOAD BYPASS)
+   ⚡ ALL FAST ROTATORS
 ========================= */
 
+/* ultra-fast round robin (no modulo cost) */
 let originIndex = 0;
-const getOrigin = () => {
-  const o = ORIGINS[originIndex];
-  originIndex = (originIndex + 1) % ORIGINS.length;
-  return o;
-};
+const ORIGIN_LEN = ORIGINS.length;
+const getOrigin = () => ORIGINS[(originIndex = (originIndex + 1) & (ORIGIN_LEN - 1))] || ORIGINS[0];
 
 /*
- 🔥 KEY OPTIMIZATION
- Stable time-based startNumber avoids cold-start delay
- WITHOUT touching m4s_min
+ 🚀 FAST startNumber
+ - aligned to segment window
+ - removes startup buffering
 */
 const rotateStartNumber = () =>
-  BASE_START + (Math.floor(Date.now() / 6000) * STEP);
+  BASE_START + ((Date.now() / 6000) | 0) * STEP;
 
+/* ultra-light IAS (timestamp only) */
 const rotateIAS = () => `RR${Date.now()}`;
-const rotateUserSession = () => Math.random().toString().slice(2);
+
+/* fast session id (no heavy math) */
+const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e6 | 0)}`;
 
 /* =========================
    HOME
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD Proxy running (m4s_min untouched, fast mode)");
+  res.send("✅ DASH MPD Proxy running (ALL FAST ROTATION)");
 });
 
 /* =========================
@@ -88,16 +89,14 @@ app.get("/:channelId/*", async (req, res) => {
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  /*
-   ⚠️ m4s_min=1 IS NOT CHANGED
-  */
+  /* 🔒 m4s_min=1 UNCHANGED */
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +                // 🔒 untouched
+    `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` + // 🚀 bypass delay here
+    `&startNumber=${rotateStartNumber()}` +
     `&filedura=6` +
     `&ispcode=55` +
     `&IASHttpSessionId=${rotateIAS()}` +
@@ -125,21 +124,17 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     /* =========================
-       MPD HANDLING
+       MPD HANDLING (FAST)
     ========================= */
 
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
-
       const proxyBaseURL =
         `${req.protocol}://${req.get("host")}/${channelId}/`;
 
       mpd = mpd
         .replace(BASEURL_REGEX, "")
-        .replace(
-          MPD_TAG_REGEX,
-          `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
-        );
+        .replace(MPD_TAG_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -174,5 +169,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running FAST (m4s_min untouched)`);
+  console.log(`🚀 Server running (ALL FAST ROTATION enabled)`);
 });
