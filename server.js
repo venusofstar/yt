@@ -31,7 +31,7 @@ const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
 const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
-   KEEP-ALIVE AGENT
+   HTTP KEEP-ALIVE AGENT
 ========================= */
 
 const agent = new http.Agent({
@@ -67,7 +67,7 @@ const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD Proxy – Fast, Full Stock, Minimal Buffer");
+  res.send("✅ DASH MPD Proxy running (Fast Rotation + Full Stock + ztecid dynamic)");
 });
 
 /* =========================
@@ -81,7 +81,10 @@ app.get("/:channelId/*", async (req, res) => {
 
   const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  // m4s_min=1 unchanged
+  // dynamic ztecid per channel
+  const ztecid = `ch0000009099000000${channelId}`;
+
+  // m4s_min=1 untouched
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
@@ -91,6 +94,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&startNumber=${rotateStartNumber()}` +
     `&filedura=6` +
     `&ispcode=55` +
+    `&ztecid=${ztecid}` +
     `&IASHttpSessionId=${rotateIAS()}` +
     `&usersessionid=${rotateUserSession()}`;
 
@@ -137,7 +141,7 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     /* =========================
-       SEGMENT STREAMING WITH FULL STOCK
+       SEGMENT STREAMING (FULL STOCK)
     ========================== */
 
     res.writeHead(upstream.status, {
@@ -161,5 +165,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running – Full Stock / Fast / Low Buffer`);
+  console.log(`🚀 Server running (Fast Rotation + Full Stock + ztecid dynamic)`);
 });
