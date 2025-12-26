@@ -26,19 +26,20 @@ const ORIGINS = [
 
 const BASE_START = 46489952;
 const STEP = 6;
+const BUFFER_SIZE = 3; // number of segments to prefetch
 
 const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
 const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
-   HTTP KEEP-ALIVE AGENT
+   HTTP AGENT
 ========================= */
 
 const agent = new http.Agent({
   keepAlive: true,
-  keepAliveMsecs: 10000,
+  keepAliveMsecs: 5000,
   maxSockets: 1024,
-  maxFreeSockets: 256,
+  maxFreeSockets: 512,
   timeout: 30000
 });
 
@@ -49,7 +50,7 @@ const agent = new http.Agent({
 app.use(cors({ origin: "*" }));
 
 /* =========================
-   FAST ROTATORS
+   ROTATORS
 ========================= */
 
 let originIndex = 0;
@@ -66,28 +67,30 @@ const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD Proxy running (Fast + Pre-fetch + Auto Retry)");
+  res.send("✅ DASH Proxy running (Rolling Buffer + Pre-fetch + Auto Retry)");
 });
 
 /* =========================
-   UTILITY: Fetch segment with retry
+   UTILITY: Fetch with retry
 ========================= */
 
 async function fetchSegment(url, headers, maxAttempts = ORIGINS.length) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const origin = getOrigin();
+    const finalURL = url.replace("{origin}", origin);
     try {
-      const upstream = await fetch(url, { headers, agent });
+      const upstream = await fetch(finalURL, { agent, headers });
       if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
       return upstream;
     } catch (err) {
-      console.error(`❌ Segment fetch attempt ${attempt + 1} failed: ${err.message}`);
+      console.error(`❌ Attempt ${attempt + 1} failed: ${err.message}`);
     }
   }
-  throw new Error("All origins failed for segment fetch");
+  throw new Error("All origins failed");
 }
 
 /* =========================
-   DASH PROXY WITH PREFETCH
+   DASH PROXY HANDLER
 ========================= */
 
 app.get("/:channelId/*", async (req, res) => {
@@ -102,7 +105,7 @@ app.get("/:channelId/*", async (req, res) => {
     ...(req.headers.range && { Range: req.headers.range })
   };
 
-  const baseUpstreamURL = (origin) =>
+  const buildURL = (origin, startNumber = rotateStartNumber()) =>
     `${origin}/001/2/${ztecid}/${path}` +
     (path.includes("?") ? "&" : "?") +
     `JITPDRMType=Widevine` +
@@ -110,7 +113,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
+    `&startNumber=${startNumber}` +
     `&filedura=6` +
     `&ispcode=55` +
     `&ztecid=${ztecid}` +
@@ -118,9 +121,9 @@ app.get("/:channelId/*", async (req, res) => {
     `&usersessionid=${rotateUserSession()}`;
 
   try {
+    // MPD handling
     if (path.endsWith(".mpd")) {
-      // Fetch and rewrite MPD
-      const upstream = await fetchSegment(baseUpstreamURL(getOrigin()), headers);
+      const upstream = await fetchSegment(buildURL(getOrigin()), headers);
       let mpd = await upstream.text();
       const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
       mpd = mpd.replace(BASEURL_REGEX, "").replace(
@@ -137,34 +140,46 @@ app.get("/:channelId/*", async (req, res) => {
       return;
     }
 
-    // For segments: pre-fetch next segment
-    const segmentStream = async (url) => {
-      const upstream = await fetchSegment(url, headers);
-      return upstream.body;
-    };
+    // Rolling buffer for segments
+    let startNumber = rotateStartNumber();
 
-    const currentURL = baseUpstreamURL(getOrigin());
-    const nextURL = baseUpstreamURL(getOrigin()); // naive: could calculate next segment
-
-    // Start pre-fetching next segment (non-blocking)
-    const nextSegmentPromise = segmentStream(nextURL).catch(() => null);
-
-    // Pipe current segment
-    const currentStream = await segmentStream(currentURL);
     res.writeHead(200, {
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
 
-    currentStream.pipe(res);
+    const sendSegment = async (number) => {
+      const url = buildURL(getOrigin(), number);
+      const upstream = await fetchSegment(url, headers);
 
-    // Optionally, you could pipe nextSegmentPromise to a temporary buffer
-    // for faster delivery when the client requests it
+      // Pipe the segment immediately
+      await new Promise((resolve, reject) => {
+        const passthrough = new stream.PassThrough();
+        upstream.body.pipe(passthrough).pipe(res, { end: false });
+        upstream.body.on("end", resolve);
+        upstream.body.on("error", reject);
+      });
+    };
+
+    while (true) {
+      // Pre-fetch next BUFFER_SIZE segments
+      const prefetch = [];
+      for (let i = 0; i < BUFFER_SIZE; i++) {
+        prefetch.push(sendSegment(startNumber + i * STEP));
+      }
+
+      // Wait for the first segment to finish before moving forward
+      await prefetch[0];
+
+      startNumber += STEP;
+      // Continue loop; remaining prefetched segments will pipe as they finish
+    }
 
   } catch (err) {
-    console.error(`❌ Error fetching segment: ${err.message}`);
-    res.sendStatus(502);
+    console.error(`❌ Proxy error: ${err.message}`);
+    if (!res.headersSent) res.sendStatus(502);
+    else res.end();
   }
 });
 
@@ -173,5 +188,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} (Fast Rotation + Pre-fetch + Auto Retry enabled)`);
+  console.log(`🚀 Server running on port ${PORT} (Rolling Buffer + Pre-fetch + Auto Retry enabled)`);
 });
