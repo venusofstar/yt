@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // ========================
-// HOME
+// HOME PAGE
 // ========================
 app.get("/", (req, res) => {
   res.send(`
@@ -17,7 +17,7 @@ app.get("/", (req, res) => {
       <head><title>DASH MPD Proxy</title></head>
       <body style="font-family:Arial;text-align:center;margin-top:50px">
         <h1>✅ DASH MPD PROXY</h1>
-        <p>Fully Converted • No Redirect</p>
+        <p>No Redirect • No Leak • Fully Optimized</p>
       </body>
     </html>
   `);
@@ -30,14 +30,14 @@ app.get("/:channelId/manifest.mpd", async (req, res) => {
   try {
     const { channelId } = req.params;
 
-    const origin =
+    const originMPD =
       `http://143.44.136.67:6060/001/2/ch0000009099000000${channelId}/manifest.mpd` +
       `?JITPDRMType=Widevine` +
       `&virtualDomain=001.live_hls.zte.com` +
       `&m4s_min=1` +
       `&ztecid=ch0000009099000000${channelId}`;
 
-    const mpdRes = await fetch(origin, {
+    const mpdRes = await fetch(originMPD, {
       headers: {
         "User-Agent": "Mozilla/5.0",
         "Accept": "*/*"
@@ -47,19 +47,32 @@ app.get("/:channelId/manifest.mpd", async (req, res) => {
     let mpd = await mpdRes.text();
 
     // ========================
-    // REWRITE SEGMENT URLS
+    // BASEURL REWRITE (NO LEAK)
     // ========================
+    const proxyBase = `/seg/${channelId}/`;
+
+    // Remove ALL existing BaseURL
+    mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gis, "");
+
+    // Inject safe BaseURL
+    mpd = mpd.replace(
+      /<MPD([^>]*)>/i,
+      `<MPD$1><BaseURL>${proxyBase}</BaseURL>`
+    );
+
+    // Sanitize absolute URLs in SegmentTemplate
     mpd = mpd
-      .replace(/(initialization=")([^"]+)"/g, `$1/seg/${channelId}/$2"`)
-      .replace(/(media=")([^"]+)"/g, `$1/seg/${channelId}/$2"`);
+      .replace(/(initialization=")(https?:\/\/[^\/]+\/)?/g, `$1`)
+      .replace(/(media=")(https?:\/\/[^\/]+\/)?/g, `$1`);
 
     res.setHeader("Content-Type", "application/dash+xml");
     res.setHeader("Cache-Control", "no-cache");
-    res.send(mpd);
+    res.setHeader("Access-Control-Expose-Headers", "*");
 
+    res.send(mpd);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("MPD fetch error");
+    console.error("MPD ERROR:", err);
+    res.status(500).send("MPD Proxy Error");
   }
 });
 
@@ -81,18 +94,23 @@ app.get("/seg/:channelId/*", async (req, res) => {
       }
     });
 
-    res.setHeader("Content-Type", segRes.headers.get("content-type") || "application/octet-stream");
+    res.setHeader(
+      "Content-Type",
+      segRes.headers.get("content-type") || "application/octet-stream"
+    );
+
+    // Small cache for live stability
     res.setHeader("Cache-Control", "public, max-age=2");
+    res.setHeader("Access-Control-Allow-Origin", "*");
 
     segRes.body.pipe(res);
-
   } catch (err) {
-    console.error(err);
+    console.error("SEGMENT ERROR:", err);
     res.status(500).end();
   }
 });
 
 // ========================
 app.listen(PORT, () => {
-  console.log(`🚀 DASH MPD Proxy running on ${PORT}`);
+  console.log(`🚀 DASH MPD Proxy running on port ${PORT}`);
 });
