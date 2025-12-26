@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const fetch = require("node-fetch");
 const http = require("http");
 const https = require("https");
 const { pipeline } = require("stream");
@@ -11,22 +12,22 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// KEEP-ALIVE AGENTS
+// KEEP-ALIVE AGENTS (CRITICAL)
 // =========================
 const httpAgent = new http.Agent({
   keepAlive: true,
-  maxSockets: 200,
+  maxSockets: 100,
   keepAliveMsecs: 30000
 });
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 200,
+  maxSockets: 100,
   keepAliveMsecs: 30000
 });
 
 // =========================
-// ORIGINS
+// ORIGIN ROTATION
 // =========================
 const ORIGINS = [
   "http://136.239.158.18:6610",
@@ -39,23 +40,9 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-const channelOriginMap = new Map();
-let rr = 0;
-
-// =========================
-// PRELOAD CACHE
-// =========================
-const preloadCache = new Map();
-
-// =========================
-// ORIGIN SELECTORS
-// =========================
-function getStickyOrigin(channelId) {
-  if (!channelOriginMap.has(channelId)) {
-    channelOriginMap.set(channelId, ORIGINS[rr++ % ORIGINS.length]);
-  }
-  return channelOriginMap.get(channelId);
-}
+let originIndex = 0;
+const getOrigin = () =>
+  ORIGINS[(originIndex = (originIndex + 1) % ORIGINS.length)];
 
 // =========================
 // AUTH ROTATION
@@ -70,37 +57,10 @@ const rotateUserSession = () =>
   Math.floor(Math.random() * 1e15).toString();
 
 // =========================
-// FAILOVER FETCH
-// =========================
-async function fetchWithFailover(urlBuilder, options, channelId) {
-  const tried = new Set();
-  let lastErr;
-
-  for (let i = 0; i < ORIGINS.length; i++) {
-    const origin = getStickyOrigin(channelId);
-    tried.add(origin);
-
-    try {
-      const res = await fetch(urlBuilder(origin), options);
-      if (res.ok) return { res, origin };
-      lastErr = res.status;
-    } catch (e) {
-      lastErr = e.message;
-    }
-
-    channelOriginMap.delete(channelId);
-    const next = ORIGINS.find(o => !tried.has(o));
-    if (next) channelOriginMap.set(channelId, next);
-  }
-
-  throw new Error(`All origins failed: ${lastErr}`);
-}
-
-// =========================
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD → MPD Proxy (FAILOVER + PRELOAD)");
+  res.send("✅ DASH MPD → MPD Proxy (BUFFER OPTIMIZED)");
 });
 
 // =========================
@@ -109,6 +69,10 @@ app.get("/", (_, res) => {
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
+  const origin = getOrigin();
+
+  const upstreamBase =
+    `${origin}/001/2/ch0000009099000000${channelId}/`;
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -122,32 +86,25 @@ app.get("/:channelId/*", async (req, res) => {
     `&IASHttpSessionId=${rotateIAS()}` +
     `&usersessionid=${rotateUserSession()}`;
 
-  const buildURL = (origin) => {
-    const base =
-      `${origin}/001/2/ch0000009099000000${channelId}/`;
-    return path.includes("?")
-      ? `${base}${path}&${authParams}`
-      : `${base}${path}?${authParams}`;
-  };
+  const targetURL =
+    path.includes("?")
+      ? `${upstreamBase}${path}&${authParams}`
+      : `${upstreamBase}${path}?${authParams}`;
 
   try {
-    const { res: upstream, origin } = await fetchWithFailover(
-      buildURL,
-      {
-        agent: buildURL("https").startsWith("https")
-          ? httpsAgent
-          : httpAgent,
-        headers: {
-          "User-Agent": req.headers["user-agent"] || "OTT",
-          "Accept": "*/*",
-          "Range": req.headers.range || "",
-          "Connection": "keep-alive"
-        }
+    const upstream = await fetch(targetURL, {
+      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "OTT",
+        "Accept": "*/*",
+        "Connection": "keep-alive"
       },
-      channelId
-    );
+      timeout: 15000
+    });
 
-    channelOriginMap.set(channelId, origin);
+    if (!upstream.ok) {
+      return res.status(upstream.status).end();
+    }
 
     // =========================
     // MPD HANDLING
@@ -166,7 +123,8 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
         "Access-Control-Allow-Origin": "*"
       });
 
@@ -174,35 +132,14 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // SEGMENT PRELOAD
+    // SEGMENTS (SMOOTH STREAM)
     // =========================
-    if (path.endsWith(".m4s")) {
-      const m = path.match(/(\d+)\.m4s/);
-      if (m) {
-        const nextPath = path.replace(m[1], Number(m[1]) + 1);
-        const preloadURL = buildURL(origin).replace(path, nextPath);
-
-        if (!preloadCache.has(preloadURL)) {
-          preloadCache.set(preloadURL, true);
-          fetch(preloadURL, {
-            agent: preloadURL.startsWith("https")
-              ? httpsAgent
-              : httpAgent,
-            headers: { "User-Agent": "OTT" }
-          }).catch(() => {});
-          setTimeout(() => preloadCache.delete(preloadURL), 3000);
-        }
-      }
-    }
-
-    // =========================
-    // STREAM PIPE
-    // =========================
-    res.status(upstream.status);
-    upstream.headers.forEach((v, k) => res.setHeader(k, v));
+    res.status(200);
     res.set({
+      "Content-Type": "video/mp4",
       "Cache-Control": "public, max-age=1",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Connection": "keep-alive"
     });
 
     pipeline(upstream.body, res, err => {
@@ -211,8 +148,7 @@ app.get("/:channelId/*", async (req, res) => {
 
   } catch (err) {
     console.error("❌ Proxy error:", err.message);
-    channelOriginMap.delete(channelId);
-    res.sendStatus(502);
+    res.status(502).end();
   }
 });
 
@@ -220,5 +156,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ DASH Proxy running on port ${PORT}`);
+  console.log(`✅ Optimized DASH proxy running on port ${PORT}`);
 });
