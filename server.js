@@ -22,15 +22,15 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-let rotateIndex = 0;
+let originIndex = 0;
 function getOrigin() {
-  const origin = ORIGINS[rotateIndex];
-  rotateIndex = (rotateIndex + 1) % ORIGINS.length;
-  return origin;
+  const o = ORIGINS[originIndex];
+  originIndex = (originIndex + 1) % ORIGINS.length;
+  return o;
 }
 
 // =========================
-// FAST AUTH ROTATION
+// AUTH ROTATION
 // =========================
 function rotateStartNumber() {
   const base = 46489952;
@@ -50,19 +50,22 @@ function rotateUserSession() {
 // HOME
 // =========================
 app.get("/", (req, res) => {
-  res.send("✅ MPD → MPD Proxy is running");
+  res.send("✅ DASH MPD → MPD Proxy is running");
 });
 
 // =========================
-// MPD → MPD FULL PROXY
+// FULL DASH PROXY (MPD + SEGMENTS)
 // =========================
-app.get("/:channelId/manifest.mpd", async (req, res) => {
+app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
+  const path = req.params[0]; // manifest.mpd OR .m4s/.mp4
   const origin = getOrigin();
 
-  const targetURL =
-    `${origin}/001/2/ch0000009099000000${channelId}/manifest.mpd` +
-    `?JITPDRMType=Widevine` +
+  const upstreamBase =
+    `${origin}/001/2/ch0000009099000000${channelId}/`;
+
+  const authParams =
+    `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
     `&m4s_min=1` +
     `&NeedJITP=1` +
@@ -73,9 +76,12 @@ app.get("/:channelId/manifest.mpd", async (req, res) => {
     `&IASHttpSessionId=${rotateIAS()}` +
     `&usersessionid=${rotateUserSession()}`;
 
-  try {
-    console.log("📡 Fetching MPD:", targetURL);
+  const targetURL =
+    path.includes("?")
+      ? `${upstreamBase}${path}&${authParams}`
+      : `${upstreamBase}${path}?${authParams}`;
 
+  try {
     const upstream = await fetch(targetURL, {
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
@@ -84,22 +90,53 @@ app.get("/:channelId/manifest.mpd", async (req, res) => {
       }
     });
 
-    res.status(upstream.status);
+    if (!upstream.ok) {
+      console.error("❌ Upstream error:", upstream.status);
+      return res.status(upstream.status).end();
+    }
 
-    // DASH SAFE HEADERS
+    // =========================
+    // MPD → BaseURL REWRITE
+    // =========================
+    if (path.endsWith(".mpd")) {
+      let mpd = await upstream.text();
+
+      const proxyBaseURL =
+        `${req.protocol}://${req.get("host")}/${channelId}/`;
+
+      // Remove ALL existing BaseURL
+      mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
+
+      // Inject proxy BaseURL
+      mpd = mpd.replace(
+        /<MPD([^>]*)>/,
+        `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
+      );
+
+      res.set({
+        "Content-Type": "application/dash+xml",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Access-Control-Allow-Origin": "*"
+      });
+
+      return res.send(mpd);
+    }
+
+    // =========================
+    // MEDIA SEGMENTS (.m4s/.mp4)
+    // =========================
+    res.status(upstream.status);
     res.set({
-      "Content-Type": "application/dash+xml",
-      "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "Pragma": "no-cache",
-      "Expires": "0"
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*"
     });
 
     upstream.body.pipe(res);
 
   } catch (err) {
-    console.error("❌ MPD Proxy Error:", err.message);
-    res.status(502).send("MPD upstream error");
+    console.error("❌ DASH Proxy Error:", err.message);
+    res.status(502).end();
   }
 });
 
@@ -107,5 +144,5 @@ app.get("/:channelId/manifest.mpd", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ MPD Proxy running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
