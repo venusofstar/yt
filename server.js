@@ -54,10 +54,10 @@ app.get("/", (req, res) => {
 });
 
 // =========================
-// FULL DASH PROXY (MPD + SEGMENTS) WITH channelId + ztecid
+// FULL DASH PROXY (MPD + SEGMENTS)
 // =========================
-app.get("/:channelId/:ztecid/*", async (req, res) => {
-  const { channelId, ztecid } = req.params;
+app.get("/:channelId/*", async (req, res) => {
+  const { channelId } = req.params;
   const path = req.params[0]; // manifest.mpd OR .m4s/.mp4
   const origin = getOrigin();
 
@@ -74,8 +74,7 @@ app.get("/:channelId/:ztecid/*", async (req, res) => {
     `&filedura=6` +
     `&ispcode=55` +
     `&IASHttpSessionId=${rotateIAS()}` +
-    `&usersessionid=${rotateUserSession()}` +
-    `&ztecid=${ztecid}`; // include ztecid
+    `&usersessionid=${rotateUserSession()}`;
 
   const targetURL =
     path.includes("?")
@@ -103,9 +102,12 @@ app.get("/:channelId/:ztecid/*", async (req, res) => {
       let mpd = await upstream.text();
 
       const proxyBaseURL =
-        `${req.protocol}://${req.get("host")}/${channelId}/${ztecid}/`;
+        `${req.protocol}://${req.get("host")}/${channelId}/`;
 
+      // Remove ALL existing BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
+
+      // Inject proxy BaseURL
       mpd = mpd.replace(
         /<MPD([^>]*)>/,
         `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
