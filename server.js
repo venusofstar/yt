@@ -1,16 +1,40 @@
+/**
+ * FAST & SMOOTH DASH MPD + SEGMENT PROXY
+ * Optimized for low buffering & stability
+ */
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
+const http = require("http");
+const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+/* =========================
+   BASIC MIDDLEWARE
+========================= */
 app.use(cors());
-app.use(express.raw({ type: "*/*" }));
 
-// =========================
-// ORIGIN ROTATION
-// =========================
+/* =========================
+   HTTP KEEP-ALIVE AGENTS
+========================= */
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  timeout: 60000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  timeout: 60000
+});
+
+/* =========================
+   ORIGIN ROTATION
+========================= */
 const ORIGINS = [
   "http://136.239.158.18:6610",
   "http://136.239.158.20:6610",
@@ -24,42 +48,48 @@ const ORIGINS = [
 
 let originIndex = 0;
 function getOrigin() {
-  const o = ORIGINS[originIndex];
+  const origin = ORIGINS[originIndex];
   originIndex = (originIndex + 1) % ORIGINS.length;
-  return o;
+  return origin;
 }
 
-// =========================
-// AUTH ROTATION
-// =========================
-function rotateStartNumber() {
-  const base = 46489952;
-  const step = 6;
-  return base + Math.floor(Math.random() * 100000) * step;
+/* =========================
+   SESSION PINNING (IMPORTANT)
+========================= */
+const sessionCache = new Map();
+
+function createSession() {
+  return {
+    created: Date.now(),
+    startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
+    IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+    user: Math.floor(Math.random() * 1e15).toString()
+  };
 }
 
-function rotateIAS() {
-  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+function getSession(ip) {
+  const TTL = 60_000; // 60 seconds
+  if (!sessionCache.has(ip) || Date.now() - sessionCache.get(ip).created > TTL) {
+    sessionCache.set(ip, createSession());
+  }
+  return sessionCache.get(ip);
 }
 
-function rotateUserSession() {
-  return Math.floor(Math.random() * 1e15).toString();
-}
-
-// =========================
-// HOME
-// =========================
+/* =========================
+   HOME
+========================= */
 app.get("/", (req, res) => {
-  res.send("✅ DASH MPD → MPD Proxy is running");
+  res.send("✅ DASH MPD → MPD Proxy running (FAST MODE)");
 });
 
-// =========================
-// FULL DASH PROXY (MPD + SEGMENTS)
-// =========================
+/* =========================
+   DASH PROXY (MPD + SEGMENTS)
+========================= */
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
-  const path = req.params[0]; // manifest.mpd OR .m4s/.mp4
+  const path = req.params[0];
   const origin = getOrigin();
+  const session = getSession(req.ip);
 
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
@@ -70,11 +100,11 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
+    `&startNumber=${session.startNumber}` +
     `&filedura=6` +
     `&ispcode=55` +
-    `&IASHttpSessionId=${rotateIAS()}` +
-    `&usersessionid=${rotateUserSession()}`;
+    `&IASHttpSessionId=${session.IAS}` +
+    `&usersessionid=${session.user}`;
 
   const targetURL =
     path.includes("?")
@@ -83,11 +113,13 @@ app.get("/:channelId/*", async (req, res) => {
 
   try {
     const upstream = await fetch(targetURL, {
+      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
         "Accept": "*/*",
         "Connection": "keep-alive"
-      }
+      },
+      timeout: 15000
     });
 
     if (!upstream.ok) {
@@ -95,16 +127,16 @@ app.get("/:channelId/*", async (req, res) => {
       return res.status(upstream.status).end();
     }
 
-    // =========================
-    // MPD → BaseURL REWRITE
-    // =========================
+    /* =========================
+       MPD HANDLING
+    ========================= */
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
 
       const proxyBaseURL =
         `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Remove ALL existing BaseURL
+      // Remove ALL BaseURL entries
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
 
       // Inject proxy BaseURL
@@ -117,19 +149,22 @@ app.get("/:channelId/*", async (req, res) => {
         "Content-Type": "application/dash+xml",
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
-        "Access-Control-Allow-Origin": "*"
+        "Access-Control-Allow-Origin": "*",
+        "Connection": "keep-alive"
       });
 
       return res.send(mpd);
     }
 
-    // =========================
-    // MEDIA SEGMENTS (.m4s/.mp4)
-    // =========================
+    /* =========================
+       MEDIA SEGMENTS
+    ========================= */
     res.status(upstream.status);
     res.set({
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Accept-Ranges": "bytes",
+      "Connection": "keep-alive"
     });
 
     upstream.body.pipe(res);
@@ -140,9 +175,9 @@ app.get("/:channelId/*", async (req, res) => {
   }
 });
 
-// =========================
-// START SERVER
-// =========================
+/* =========================
+   START SERVER
+========================= */
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ FAST DASH Proxy running on port ${PORT}`);
 });
