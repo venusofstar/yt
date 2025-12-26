@@ -32,14 +32,14 @@ const BASEURL_REGEX = /<BaseURL>.*?<\/BaseURL>/gs;
 const MPD_TAG_REGEX = /<MPD([^>]*)>/;
 
 /* =========================
-   HTTP AGENT
+   HTTP KEEP-ALIVE AGENT
 ========================= */
 
 const agent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 5000,
   maxSockets: 1024,
-  maxFreeSockets: 512,
+  maxFreeSockets: 256,
   timeout: 30000
 });
 
@@ -67,36 +67,19 @@ const rotateUserSession = () => `${Date.now().toString(36)}${(Math.random() * 1e
 ========================= */
 
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy running (Rolling Buffer + Pre-fetch + Auto Retry)");
+  res.send("✅ DASH MPD Proxy running (Fast + Rolling Buffer + Auto Retry)");
 });
 
 /* =========================
-   UTILITY: Fetch with retry
-========================= */
-
-async function fetchSegment(url, headers, maxAttempts = ORIGINS.length) {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const origin = getOrigin();
-    const finalURL = url.replace("{origin}", origin);
-    try {
-      const upstream = await fetch(finalURL, { agent, headers });
-      if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
-      return upstream;
-    } catch (err) {
-      console.error(`❌ Attempt ${attempt + 1} failed: ${err.message}`);
-    }
-  }
-  throw new Error("All origins failed");
-}
-
-/* =========================
-   DASH PROXY HANDLER
+   DASH PROXY WITH ROLLING BUFFER
 ========================= */
 
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
+
   const ztecid = `ch0000009099000000${channelId}`;
+  const maxAttempts = ORIGINS.length;
 
   const headers = {
     "User-Agent": req.headers["user-agent"] || "OTT",
@@ -105,7 +88,7 @@ app.get("/:channelId/*", async (req, res) => {
     ...(req.headers.range && { Range: req.headers.range })
   };
 
-  const buildURL = (origin, startNumber = rotateStartNumber()) =>
+  const buildURL = (origin, startNumber) =>
     `${origin}/001/2/${ztecid}/${path}` +
     (path.includes("?") ? "&" : "?") +
     `JITPDRMType=Widevine` +
@@ -121,15 +104,26 @@ app.get("/:channelId/*", async (req, res) => {
     `&usersessionid=${rotateUserSession()}`;
 
   try {
-    // MPD handling
+    // Handle MPD files
     if (path.endsWith(".mpd")) {
-      const upstream = await fetchSegment(buildURL(getOrigin()), headers);
-      let mpd = await upstream.text();
+      let attempt = 0;
+      let mpd;
+      while (attempt < maxAttempts) {
+        const origin = getOrigin();
+        const upstreamBase = buildURL(origin, rotateStartNumber());
+        try {
+          const upstream = await fetch(upstreamBase, { agent, headers });
+          if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
+          mpd = await upstream.text();
+          break;
+        } catch (err) {
+          attempt++;
+          if (attempt >= maxAttempts) throw err;
+        }
+      }
+
       const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
-      mpd = mpd.replace(BASEURL_REGEX, "").replace(
-        MPD_TAG_REGEX,
-        `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
-      );
+      mpd = mpd.replace(BASEURL_REGEX, "").replace(MPD_TAG_REGEX, `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`);
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -150,30 +144,40 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
     const sendSegment = async (number) => {
-      const url = buildURL(getOrigin(), number);
-      const upstream = await fetchSegment(url, headers);
+      let attempt = 0;
+      while (attempt < maxAttempts) {
+        const origin = getOrigin();
+        const url = buildURL(origin, number);
+        try {
+          const upstream = await fetch(url, { agent, headers });
+          if (!upstream.ok) throw new Error(`Upstream returned ${upstream.status}`);
 
-      // Pipe the segment immediately
-      await new Promise((resolve, reject) => {
-        const passthrough = new stream.PassThrough();
-        upstream.body.pipe(passthrough).pipe(res, { end: false });
-        upstream.body.on("end", resolve);
-        upstream.body.on("error", reject);
-      });
+          const passthrough = new stream.PassThrough();
+          upstream.body.pipe(passthrough).pipe(res, { end: false });
+
+          await new Promise((resolve, reject) => {
+            upstream.body.on("end", resolve);
+            upstream.body.on("error", reject);
+          });
+
+          break;
+        } catch (err) {
+          attempt++;
+          if (attempt >= maxAttempts) throw err;
+        }
+      }
     };
 
+    // Infinite rolling buffer
     while (true) {
-      // Pre-fetch next BUFFER_SIZE segments
-      const prefetch = [];
+      const bufferSegments = [];
       for (let i = 0; i < BUFFER_SIZE; i++) {
-        prefetch.push(sendSegment(startNumber + i * STEP));
+        bufferSegments.push(sendSegment(startNumber + i * STEP));
       }
-
-      // Wait for the first segment to finish before moving forward
-      await prefetch[0];
-
+      // Wait for first segment to finish
+      await bufferSegments[0];
       startNumber += STEP;
-      // Continue loop; remaining prefetched segments will pipe as they finish
+      // Remaining segments in buffer will pipe as they finish
     }
 
   } catch (err) {
@@ -188,5 +192,5 @@ app.get("/:channelId/*", async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} (Rolling Buffer + Pre-fetch + Auto Retry enabled)`);
+  console.log(`🚀 Server running on port ${PORT} (Rolling Buffer enabled)`);
 });
