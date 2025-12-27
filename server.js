@@ -1,6 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
+const http = require("http");
+const https = require("https");
+const { pipeline } = require("stream");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,144 +12,142 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// ORIGINS (rotate once on server start)
+// KEEP-ALIVE AGENTS (CRITICAL)
 // =========================
-const ORIGINS = [
-  "http://136.239.158.18:6610",
-  "http://136.239.158.20:6610",
-  "http://136.239.158.30:6610"
-];
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  keepAliveMsecs: 30000
+});
 
-const SELECTED_ORIGIN = ORIGINS[Math.floor(Math.random() * ORIGINS.length)];
-
-// =========================
-// AUTH VALUES (rotate once on server start)
-// =========================
-const START_NUMBER = (() => {
-  const base = 46489952;
-  const step = 6;
-  return base + Math.floor(Math.random() * 100000) * step;
-})();
-
-const IAS_SESSION = "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
-const USER_SESSION = Math.floor(Math.random() * 1e15).toString();
-
-console.log("🔁 Origin:", SELECTED_ORIGIN);
-console.log("▶ StartNumber:", START_NUMBER);
-console.log("🔐 IAS:", IAS_SESSION);
-console.log("👤 UserSession:", USER_SESSION);
-
-// =========================
-// MPD Cache for live streams
-// =========================
-const mpdCache = new Map(); // key: channelId, value: { mpdText, lastFetch }
-
-async function getLiveMPD(channelId) {
-  const cache = mpdCache.get(channelId);
-  const now = Date.now();
-
-  // Re-fetch MPD if older than 2 seconds
-  if (!cache || now - cache.lastFetch > 2000) {
-    const upstreamBase = `${SELECTED_ORIGIN}/001/2/ch0000009099000000${channelId}/`;
-    const authParams = `JITPDRMType=Widevine&startNumber=${START_NUMBER}&IASHttpSessionId=${IAS_SESSION}&usersessionid=${USER_SESSION}`;
-    const url = `${upstreamBase}manifest.mpd?${authParams}`;
-
-    const res = await fetch(url, {
-      headers: { "User-Agent": "OTT" },
-      timeout: 0
-    });
-
-    if (!res.ok) {
-      throw new Error(`Upstream MPD fetch failed: ${res.status}`);
-    }
-
-    let mpd = await res.text();
-
-    // Remove old BaseURL and inject proxy BaseURL
-    mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-    mpd = mpd.replace(
-      /<MPD([^>]*)>/,
-      `<MPD$1 minimumUpdatePeriod="PT2S"><BaseURL>http://localhost:${PORT}/${channelId}/</BaseURL>`
-    );
-
-    mpdCache.set(channelId, { mpdText: mpd, lastFetch: now });
-    return mpd;
-  }
-
-  return cache.mpdText;
-}
-
-// =========================
-// Home route
-// =========================
-app.get("/", (req, res) => {
-  res.send("✅ DASH Live Proxy is running");
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  keepAliveMsecs: 30000
 });
 
 // =========================
-// DASH Proxy Route
+// ORIGIN (NO ROTATION)
+// =========================
+const ORIGINS = [
+  "http://136.239.158.18:6610",
+  "http://143.44.136.67:6060"
+];
+
+// Always use the first origin
+const getOrigin = () => ORIGINS[0];
+
+// =========================
+// AUTH ROTATION
+// =========================
+const rotateStartNumber = () =>
+  46489952 + Math.floor(Math.random() * 100000) * 6;
+
+const rotateIAS = () =>
+  "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+
+const rotateUserSession = () =>
+  Math.floor(Math.random() * 1e15).toString();
+
+// =========================
+// HOME
+// =========================
+app.get("/", (_, res) => {
+  res.send("✅ DASH MPD → MPD Proxy (BUFFER OPTIMIZED)");
+});
+
+// =========================
+// DASH PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
-  const path = req.params[0]; // manifest.mpd or segment
+  const path = req.params[0];
+  const origin = getOrigin();
+
+  const upstreamBase =
+    `${origin}/001/2/ch0000009099000000${channelId}/`;
+
+  const authParams =
+    `JITPDRMType=Widevine` +
+    `&virtualDomain=001.live_hls.zte.com` +
+    `&m4s_min=1` +
+    `&NeedJITP=1` +
+    `&isjitp=0` +
+    `&startNumber=${rotateStartNumber()}` +
+    `&filedura=6` +
+    `&ispcode=55` +
+    `&IASHttpSessionId=${rotateIAS()}` +
+    `&usersessionid=${rotateUserSession()}`;
+
+  const targetURL =
+    path.includes("?")
+      ? `${upstreamBase}${path}&${authParams}`
+      : `${upstreamBase}${path}?${authParams}`;
 
   try {
+    const upstream = await fetch(targetURL, {
+      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
+      headers: {
+        "User-Agent": req.headers["user-agent"] || "OTT",
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+      },
+      timeout: 15000
+    });
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).end();
+    }
+
+    // =========================
+    // MPD HANDLING
+    // =========================
     if (path.endsWith(".mpd")) {
-      // Serve live MPD (auto-updates every 2 seconds)
-      const mpd = await getLiveMPD(channelId);
+      let mpd = await upstream.text();
+
+      const proxyBase =
+        `${req.protocol}://${req.get("host")}/${channelId}/`;
+
+      mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
+      mpd = mpd.replace(
+        /<MPD([^>]*)>/,
+        `<MPD$1><BaseURL>${proxyBase}</BaseURL>`
+      );
+
       res.set({
         "Content-Type": "application/dash+xml",
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
         "Access-Control-Allow-Origin": "*"
       });
+
       return res.send(mpd);
     }
 
-    // Serve media segments
-    const upstreamBase = `${SELECTED_ORIGIN}/001/2/ch0000009099000000${channelId}/`;
-    const authParams = `JITPDRMType=Widevine&startNumber=${START_NUMBER}&IASHttpSessionId=${IAS_SESSION}&usersessionid=${USER_SESSION}`;
-    const targetURL = path.includes("?")
-      ? `${upstreamBase}${path}&${authParams}`
-      : `${upstreamBase}${path}?${authParams}`;
-
-    const upstream = await fetch(targetURL, {
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*",
-        "Connection": "keep-alive"
-      },
-      timeout: 0
-    });
-
-    if (!upstream.ok) {
-      console.error("❌ Upstream segment error:", upstream.status, targetURL);
-      return res.status(upstream.status).end();
-    }
-
-    res.status(upstream.status);
+    // =========================
+    // SEGMENTS (SMOOTH STREAM)
+    // =========================
+    res.status(200);
     res.set({
-      "Content-Type": upstream.headers.get("content-type") || "application/octet-stream",
-      "Cache-Control": "no-store",
+      "Content-Type": "video/mp4",
+      "Cache-Control": "public, max-age=1",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
 
-    // Disable Node buffering
-    req.socket.setNoDelay(true);
-
-    // Stream segment to client
-    upstream.body.pipe(res);
+    pipeline(upstream.body, res, err => {
+      if (err) res.destroy();
+    });
 
   } catch (err) {
-    console.error("❌ DASH Proxy Error:", err.message);
+    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
 
 // =========================
-// Start server
+// START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ DASH Live Proxy running on port ${PORT}`);
+  console.log(`✅ Optimized DASH proxy running on port ${PORT}`);
 });
