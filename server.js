@@ -1,9 +1,8 @@
 /**
  * Fully Optimized DASH Proxy
- * - Fast failover on errors or stuck segments
- * - Origin rotation
- * - startNumber, IASHttpSessionId, usersessionid rotation
- * - m4s_min preserved for origin, bypassed for player
+ * - Fast failover on error or stuck segments
+ * - Rotate origin, startNumber, IASHttpSessionId, usersessionid
+ * - Preserve m4s_min=1 for origin, bypass for player
  */
 
 const express = require("express");
@@ -50,6 +49,7 @@ function rotateUserSession() {
   return Math.floor(Math.random() * 1e15).toString();
 }
 
+/* CACHE SESSIONS PER IP */
 const sessions = new Map();
 function getSession(ip) {
   if (!sessions.has(ip)) {
@@ -62,9 +62,7 @@ function getSession(ip) {
   return sessions.get(ip);
 }
 
-/* =========================
-   URL BUILDER
-========================= */
+/* BUILD TARGET URL */
 function buildURL(origin, channelId, path, session) {
   const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
   const auth = `JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1&NeedJITP=1&isjitp=0&startNumber=${session.startNumber}&filedura=6&ispcode=55&IASHttpSessionId=${session.IAS}&usersessionid=${session.user}`;
@@ -90,8 +88,9 @@ app.get("/:channelId/*", async (req, res) => {
     const targetURL = buildURL(origin, channelId, path, session);
 
     try {
+      // Fast fail on stuck segments (5s timeout)
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5s per request
+      const timeout = setTimeout(() => controller.abort(), 5000);
 
       const upstream = await fetch(targetURL, {
         agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
@@ -111,9 +110,13 @@ app.get("/:channelId/*", async (req, res) => {
 
         mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
         mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${baseURL}</BaseURL>`);
-        mpd = mpd.replace(/&m4s_min=1/g, ""); // bypass m4s_min
+        mpd = mpd.replace(/&m4s_min=1/g, ""); // bypass m4s_min for player
 
-        res.set({ "Content-Type": "application/dash+xml", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+        res.set({
+          "Content-Type": "application/dash+xml",
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*"
+        });
         return res.send(mpd);
       }
 
@@ -124,7 +127,8 @@ app.get("/:channelId/*", async (req, res) => {
       return upstream.body.pipe(res);
 
     } catch (err) {
-      console.warn(`❌ Attempt ${attempt + 1} failed: ${err.message}`);
+      clearTimeout(timeout);
+      console.warn(`❌ Stream failed or stuck, rotating... attempt ${attempt + 1}`, err.message);
       // Rotate origin & session fast
       originIndex++;
       session = {
