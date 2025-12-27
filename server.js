@@ -14,12 +14,7 @@ app.use(express.raw({ type: "*/*" }));
 const ORIGINS = [
   "http://136.239.158.18:6610",
   "http://136.239.158.20:6610",
-  "http://136.239.158.30:6610",
-  "http://136.239.173.3:6610",
-  "http://136.158.97.2:6610",
-  "http://136.239.173.10:6610",
-  "http://136.239.158.10:6610",
-  "http://136.239.159.20:6610"
+  "http://136.239.158.30:6610"
 ];
 
 const SELECTED_ORIGIN = ORIGINS[Math.floor(Math.random() * ORIGINS.length)];
