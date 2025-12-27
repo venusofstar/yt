@@ -1,4 +1,4 @@
-ROTATE ALL WHEN STUCK AND ERROR THE STREAM
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
