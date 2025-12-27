@@ -12,7 +12,7 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// KEEP-ALIVE AGENTS (CRITICAL)
+// KEEP-ALIVE AGENTS
 // =========================
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -27,7 +27,7 @@ const httpsAgent = new https.Agent({
 });
 
 // =========================
-// ORIGIN ROTATION (1 MINUTE)
+// ORIGINS
 // =========================
 const ORIGINS = [
   "http://136.239.158.18:6610",
@@ -40,20 +40,8 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-let originIndex = 0;
-let lastRotateTime = Date.now();
-const ROTATE_INTERVAL = 60 * 1000; // 1 minute
-
-const getOrigin = () => {
-  const now = Date.now();
-
-  if (now - lastRotateTime >= ROTATE_INTERVAL) {
-    originIndex = (originIndex + 1) % ORIGINS.length;
-    lastRotateTime = now;
-  }
-
-  return ORIGINS[originIndex];
-};
+const getRandomOriginIndex = () =>
+  Math.floor(Math.random() * ORIGINS.length);
 
 // =========================
 // AUTH ROTATION
@@ -71,7 +59,7 @@ const rotateUserSession = () =>
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD → MPD Proxy (BUFFER OPTIMIZED)");
+  res.send("✅ DASH MPD → MPD Proxy (ORIGIN ROTATES ON MPD)");
 });
 
 // =========================
@@ -80,7 +68,14 @@ app.get("/", (_, res) => {
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
-  const origin = getOrigin();
+
+  // MPD = new origin | Segments = reuse
+  const originIndex =
+    req.query.oi !== undefined
+      ? Number(req.query.oi)
+      : getRandomOriginIndex();
+
+  const origin = ORIGINS[originIndex];
 
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
@@ -124,7 +119,7 @@ app.get("/:channelId/*", async (req, res) => {
       let mpd = await upstream.text();
 
       const proxyBase =
-        `${req.protocol}://${req.get("host")}/${channelId}/`;
+        `${req.protocol}://${req.get("host")}/${channelId}/?oi=${originIndex}&`;
 
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
       mpd = mpd.replace(
@@ -167,5 +162,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ Optimized DASH proxy running on port ${PORT}`);
+  console.log(`✅ DASH proxy running on port ${PORT}`);
 });
