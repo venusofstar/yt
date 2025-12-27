@@ -27,7 +27,7 @@ const httpsAgent = new https.Agent({
 });
 
 // =========================
-// ORIGIN ROTATION
+// ORIGINS
 // =========================
 const ORIGINS = [
   "http://136.239.158.18:6610",
@@ -40,48 +40,47 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-let originIndex = 0;
-const getOrigin = () =>
-  ORIGINS[(originIndex = (originIndex + 1) % ORIGINS.length)];
-
-const MAX_RETRIES = ORIGINS.length;
-
 // =========================
-// PER-CHANNEL SESSION (CRITICAL FIX)
+// PER-CHANNEL SESSION (STICKY)
 // =========================
 const channelSessions = new Map();
 
-function getChannelSession(channelId) {
+function createSession() {
+  return {
+    originIndex: Math.floor(Math.random() * ORIGINS.length), // rotate ONCE
+    startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
+    IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+    userSession: Math.floor(Math.random() * 1e15).toString()
+  };
+}
+
+function getSession(channelId) {
   if (!channelSessions.has(channelId)) {
-    channelSessions.set(channelId, {
-      startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
-      IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-      userSession: Math.floor(Math.random() * 1e15).toString()
-    });
+    channelSessions.set(channelId, createSession());
   }
   return channelSessions.get(channelId);
 }
 
-// cleanup every 10 minutes (prevents expiry issues)
-setInterval(() => {
-  channelSessions.clear();
-}, 10 * 60 * 1000);
+function rotateOrigin(session) {
+  session.originIndex = (session.originIndex + 1) % ORIGINS.length;
+}
+
+// cleanup every 10 min
+setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 
 // =========================
-// FETCH WITH ORIGIN RETRY
+// FETCH WITH STICKY ORIGIN
 // =========================
-async function fetchWithRetry(urlBuilder, req) {
-  let lastError;
-
-  for (let i = 0; i < MAX_RETRIES; i++) {
-    const origin = getOrigin();
+async function fetchSticky(urlBuilder, req, session) {
+  for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
+    const origin = ORIGINS[session.originIndex];
     const url = urlBuilder(origin);
 
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
 
-      const upstream = await fetch(url, {
+      const res = await fetch(url, {
         agent: url.startsWith("https") ? httpsAgent : httpAgent,
         headers: {
           "User-Agent": req.headers["user-agent"] || "OTT",
@@ -93,25 +92,23 @@ async function fetchWithRetry(urlBuilder, req) {
 
       clearTimeout(timeout);
 
-      if (!upstream.ok) {
-        lastError = `HTTP ${upstream.status}`;
-        continue;
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
 
-      return upstream;
     } catch (err) {
-      lastError = err.message;
+      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
+      rotateOrigin(session); // 🔥 rotate ONLY on error
     }
   }
 
-  throw new Error(lastError || "All origins failed");
+  throw new Error("All origins failed");
 }
 
 // =========================
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (NO LOOP / AUTO ORIGIN)");
+  res.send("✅ DASH Proxy (Sticky Origin, No Loop)");
 });
 
 // =========================
@@ -120,7 +117,7 @@ app.get("/", (_, res) => {
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
-  const session = getChannelSession(channelId);
+  const session = getSession(channelId);
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -128,21 +125,20 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${session.startNumber}` + // ✅ STABLE
+    `&startNumber=${session.startNumber}` +
     `&filedura=6` +
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}`;
 
   try {
-    const upstream = await fetchWithRetry(origin => {
+    const upstream = await fetchSticky(origin => {
       const base =
         `${origin}/001/2/ch0000009099000000${channelId}/`;
-
       return path.includes("?")
         ? `${base}${path}&${authParams}`
         : `${base}${path}?${authParams}`;
-    }, req);
+    }, req, session);
 
     // =========================
     // MPD
@@ -161,8 +157,7 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
+        "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*"
       });
 
@@ -172,12 +167,9 @@ app.get("/:channelId/*", async (req, res) => {
     // =========================
     // SEGMENTS
     // =========================
-    res.status(200);
     res.set({
       "Content-Type": "video/mp4",
-      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-      "Pragma": "no-cache",
-      "Expires": "0",
+      "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
@@ -187,6 +179,7 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
+        rotateOrigin(session); // 🔥 rotate on stall
         upstream.body.destroy();
         res.destroy();
       }
