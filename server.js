@@ -30,8 +30,8 @@ const httpsAgent = new https.Agent({
 // ORIGIN (NO ROTATION)
 // =========================
 const ORIGINS = [
-  "http://136.239.158.18:6610",
-  "http://143.44.136.67:6060"
+  "http://143.44.136.67:6060",
+  "http://136.239.158.18:6610"
 ];
 
 // Always use the first origin
