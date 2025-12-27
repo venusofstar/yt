@@ -23,7 +23,6 @@ const ORIGINS = [
 ];
 
 let originIndex = 0;
-// Track the current origin per channel
 const currentOrigins = {};
 
 function getOrigin(channelId, rotate = false) {
@@ -52,26 +51,46 @@ function rotateUserSession() {
 }
 
 // =========================
+// SEGMENT CACHE
+// =========================
+const segmentCache = new Map();
+const MAX_CACHE = 100; // maximum segments cached
+
+async function fetchSegmentCached(url) {
+  if (segmentCache.has(url)) return segmentCache.get(url);
+
+  const res = await fetch(url, { headers: { "Connection": "keep-alive" } });
+  const buffer = await res.arrayBuffer();
+  segmentCache.set(url, buffer);
+
+  if (segmentCache.size > MAX_CACHE) {
+    const firstKey = segmentCache.keys().next().value;
+    segmentCache.delete(firstKey);
+  }
+
+  return buffer;
+}
+
+// =========================
 // HOME
 // =========================
 app.get("/", (req, res) => {
-  res.send("✅ DASH MPD → MPD Proxy with Full Rotation is running");
+  res.send("✅ DASH MPD Proxy with Full Rotation & Buffering Support is running");
 });
 
 // =========================
-// FULL DASH PROXY (MPD + SEGMENTS)
+// FULL DASH PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
-  const path = req.params[0]; // manifest.mpd OR .m4s/.mp4
+  const path = req.params[0];
 
-  // Rotate origin only for manifest reload
   const rotateOrigin = path.endsWith(".mpd");
   const origin = getOrigin(channelId, rotateOrigin);
 
   const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-  // Rotate auth parameters on EVERY request
+  // Rotate auth params for every request
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
@@ -90,30 +109,24 @@ app.get("/:channelId/*", async (req, res) => {
       : `${upstreamBase}${path}?${authParams}`;
 
   try {
-    const upstream = await fetch(targetURL, {
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*",
-        "Connection": "keep-alive"
-      }
-    });
-
-    if (!upstream.ok) {
-      console.error("❌ Upstream error:", upstream.status);
-      return res.status(upstream.status).end();
-    }
-
     // =========================
-    // MPD → BaseURL REWRITE
+    // MANIFEST
     // =========================
     if (path.endsWith(".mpd")) {
+      const upstream = await fetch(targetURL, {
+        headers: {
+          "User-Agent": req.headers["user-agent"] || "OTT",
+          "Accept": "*/*",
+          "Connection": "keep-alive"
+        }
+      });
+
+      if (!upstream.ok) return res.status(upstream.status).end();
+
       let mpd = await upstream.text();
       const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Remove all existing BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-
-      // Inject proxy BaseURL
       mpd = mpd.replace(
         /<MPD([^>]*)>/,
         `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
@@ -130,15 +143,17 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // MEDIA SEGMENTS (.m4s/.mp4)
+    // SEGMENTS
     // =========================
-    res.status(upstream.status);
+    const buffer = await fetchSegmentCached(targetURL);
+
+    res.status(200);
     res.set({
+      "Content-Type": "video/iso.segment",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*"
     });
-
-    upstream.body.pipe(res);
+    return res.send(Buffer.from(buffer));
 
   } catch (err) {
     console.error("❌ DASH Proxy Error:", err.message);
@@ -150,5 +165,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT} with full rotation enabled`);
+  console.log(`✅ Server running on port ${PORT} with full rotation & buffering support`);
 });
