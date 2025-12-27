@@ -1,3 +1,9 @@
+/**
+ * DASH Streaming Proxy
+ * Node.js + Express
+ * Optimized for Railway deployment
+ */
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
@@ -10,13 +16,13 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 /* =========================
-   KEEP-ALIVE AGENTS
+   Keep-Alive Agents
 ========================= */
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200 });
 
 /* =========================
-   ORIGIN ROTATION
+   Origin Rotation
 ========================= */
 const ORIGINS = [
   "http://136.239.158.18:6610",
@@ -33,7 +39,7 @@ let originIndex = 0;
 const getOrigin = () => ORIGINS[originIndex++ % ORIGINS.length];
 
 /* =========================
-   SESSION PINNING (IMPORTANT)
+   Session Pinning
 ========================= */
 const sessions = new Map();
 
@@ -55,14 +61,14 @@ function getSession(ip) {
 }
 
 /* =========================
-   HOME
+   Home
 ========================= */
 app.get("/", (req, res) => {
   res.send("✅ DASH MPD Proxy running");
 });
 
 /* =========================
-   DASH PROXY
+   DASH Proxy (MPD + Segments)
 ========================= */
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -93,29 +99,19 @@ app.get("/:channelId/*", async (req, res) => {
   try {
     const upstream = await fetch(targetURL, {
       agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*"
-      },
+      headers: { "User-Agent": req.headers["user-agent"] || "OTT", "Accept": "*/*" },
       timeout: 15000
     });
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).end();
-    }
+    if (!upstream.ok) return res.status(upstream.status).end();
 
     /* ===== MPD ===== */
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
-
-      const baseURL =
-        `${req.protocol}://${req.get("host")}/${channelId}/`;
+      const baseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-      mpd = mpd.replace(
-        /<MPD([^>]*)>/,
-        `<MPD$1><BaseURL>${baseURL}</BaseURL>`
-      );
+      mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${baseURL}</BaseURL>`);
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -126,7 +122,7 @@ app.get("/:channelId/*", async (req, res) => {
       return res.send(mpd);
     }
 
-    /* ===== SEGMENTS ===== */
+    /* ===== Segments (.m4s/.mp4) ===== */
     res.set({
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
@@ -136,13 +132,13 @@ app.get("/:channelId/*", async (req, res) => {
     upstream.body.pipe(res);
 
   } catch (err) {
-    console.error("DASH error:", err.message);
+    console.error("DASH Proxy Error:", err.message);
     res.status(502).end();
   }
 });
 
 /* =========================
-   START
+   Start Server
 ========================= */
 app.listen(PORT, () => {
   console.log(`🚀 DASH proxy running on port ${PORT}`);
