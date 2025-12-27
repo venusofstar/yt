@@ -38,16 +38,38 @@ const ORIGINS = [
 const getOrigin = () => ORIGINS[0];
 
 // =========================
-// AUTH ROTATION
+// AUTH ROTATION EVERY 30 SECONDS
 // =========================
-const rotateStartNumber = () =>
-  46489952 + Math.floor(Math.random() * 100000) * 6;
+let currentStartNumber = rotateStartNumber();
+let currentIAS = rotateIAS();
+let currentUserSession = rotateUserSession();
 
-const rotateIAS = () =>
-  "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+const rotateAuthValues = () => {
+  currentStartNumber = rotateStartNumber();
+  currentIAS = rotateIAS();
+  currentUserSession = rotateUserSession();
+  console.log("🔄 Rotated auth values:", {
+    startNumber: currentStartNumber,
+    IASHttpSessionId: currentIAS,
+    usersessionid: currentUserSession
+  });
+};
 
-const rotateUserSession = () =>
-  Math.floor(Math.random() * 1e15).toString();
+// Rotate every 30 seconds
+setInterval(rotateAuthValues, 30_000);
+
+// Rotation functions
+function rotateStartNumber() {
+  return 46489952 + Math.floor(Math.random() * 100000) * 6;
+}
+
+function rotateIAS() {
+  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+}
+
+function rotateUserSession() {
+  return Math.floor(Math.random() * 1e15).toString();
+}
 
 // =========================
 // HOME
@@ -73,11 +95,11 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
+    `&startNumber=${currentStartNumber}` +
     `&filedura=6` +
     `&ispcode=55` +
-    `&IASHttpSessionId=${rotateIAS()}` +
-    `&usersessionid=${rotateUserSession()}`;
+    `&IASHttpSessionId=${currentIAS}` +
+    `&usersessionid=${currentUserSession}`;
 
   const targetURL =
     path.includes("?")
