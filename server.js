@@ -56,7 +56,7 @@ function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// Cleanup stale sessions every 10 min
+// cleanup every 10 min
 setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 
 // =========================
@@ -89,8 +89,10 @@ async function fetchSticky(urlBuilder, req, session) {
     } catch (err) {
       console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
       rotateOrigin(session); // rotate only on error
+      session.startNumber += 1; // 🔥 increment startNumber on error
     }
   }
+
   throw new Error("All origins failed");
 }
 
@@ -98,7 +100,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (Sticky Origin, Fast Failover)");
+  res.send("✅ DASH Proxy (Sticky Origin, m4s_min=1, Auto startNumber increment)");
 });
 
 // =========================
@@ -109,14 +111,28 @@ app.get("/:channelId/*", async (req, res) => {
   const path = req.params[0];
   const session = getSession(channelId);
 
-  const authParams =
-    `JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1&NeedJITP=1&isjitp=0` +
-    `&startNumber=${session.startNumber}&filedura=6&ispcode=55&IASHttpSessionId=${session.IAS}&usersessionid=${session.userSession}`;
+  const baseAuthParams = {
+    JITPDRMType: "Widevine",
+    virtualDomain: "001.live_hls.zte.com",
+    m4s_min: "1", // ✅ enforce
+    NeedJITP: "1",
+    isjitp: "0",
+    startNumber: session.startNumber,
+    filedura: "6",
+    ispcode: "55",
+    IASHttpSessionId: session.IAS,
+    usersessionid: session.userSession
+  };
 
   try {
     const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      return path.includes("?") ? `${base}${path}&${authParams}` : `${base}${path}?${authParams}`;
+      const url = new URL(path, base.startsWith("http") ? base : `http://${base}`);
+
+      // Merge auth parameters
+      Object.entries(baseAuthParams).forEach(([k, v]) => url.searchParams.set(k, v));
+
+      return url.toString();
     }, req, session);
 
     // =========================
@@ -153,8 +169,9 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Segment stall detected, rotating origin");
+        console.warn("⚠️ Segment stall detected, rotating origin and incrementing startNumber");
         rotateOrigin(session);
+        session.startNumber += 1; // 🔥 increment startNumber on stall
         upstream.body.destroy();
         res.destroy();
       }
@@ -169,6 +186,7 @@ app.get("/:channelId/*", async (req, res) => {
 
   } catch (err) {
     console.error("❌ Proxy error:", err.message);
+    session.startNumber += 1; // 🔥 increment startNumber on general failure
     res.status(502).end();
   }
 });
