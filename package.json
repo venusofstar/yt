@@ -1,11 +1,19 @@
 {
   "name": "dash-streaming-proxy",
   "version": "1.0.0",
-  "description": "Fast DASH MPD and segment proxy with NGINX support",
+  "description": "Fast DASH MPD + segment proxy with session pinning and origin rotation",
   "main": "server.js",
   "scripts": {
-    "start": "NODE_ENV=production node server.js"
+    "start": "NODE_ENV=production node server.js",
+    "dev": "node server.js"
   },
+  "keywords": [
+    "DASH",
+    "MPD",
+    "streaming",
+    "proxy",
+    "nodejs"
+  ],
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
