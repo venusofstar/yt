@@ -12,17 +12,17 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// KEEP-ALIVE AGENTS (CRITICAL)
+// KEEP-ALIVE AGENTS
 // =========================
 const httpAgent = new http.Agent({
   keepAlive: true,
-  maxSockets: 100,
+  maxSockets: 200,
   keepAliveMsecs: 30000
 });
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 100,
+  maxSockets: 200,
   keepAliveMsecs: 30000
 });
 
@@ -44,6 +44,8 @@ let originIndex = 0;
 const getOrigin = () =>
   ORIGINS[(originIndex = (originIndex + 1) % ORIGINS.length)];
 
+const MAX_RETRIES = ORIGINS.length;
+
 // =========================
 // AUTH ROTATION
 // =========================
@@ -57,10 +59,51 @@ const rotateUserSession = () =>
   Math.floor(Math.random() * 1e15).toString();
 
 // =========================
+// FETCH WITH ORIGIN RETRY
+// =========================
+async function fetchWithRetry(urlBuilder, req) {
+  let lastError;
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    const origin = getOrigin();
+    const url = urlBuilder(origin);
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+
+      const upstream = await fetch(url, {
+        agent: url.startsWith("https") ? httpsAgent : httpAgent,
+        headers: {
+          "User-Agent": req.headers["user-agent"] || "OTT",
+          "Accept": "*/*",
+          "Connection": "keep-alive"
+        },
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (!upstream.ok) {
+        lastError = `HTTP ${upstream.status}`;
+        continue;
+      }
+
+      return upstream;
+
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+
+  throw new Error(lastError || "All origins failed");
+}
+
+// =========================
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH MPD → MPD Proxy (BUFFER OPTIMIZED)");
+  res.send("✅ DASH Proxy with Auto-Origin Reload");
 });
 
 // =========================
@@ -69,10 +112,6 @@ app.get("/", (_, res) => {
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
-  const origin = getOrigin();
-
-  const upstreamBase =
-    `${origin}/001/2/ch0000009099000000${channelId}/`;
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -86,28 +125,18 @@ app.get("/:channelId/*", async (req, res) => {
     `&IASHttpSessionId=${rotateIAS()}` +
     `&usersessionid=${rotateUserSession()}`;
 
-  const targetURL =
-    path.includes("?")
-      ? `${upstreamBase}${path}&${authParams}`
-      : `${upstreamBase}${path}?${authParams}`;
-
   try {
-    const upstream = await fetch(targetURL, {
-      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
-      headers: {
-        "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*",
-        "Connection": "keep-alive"
-      },
-      timeout: 15000
-    });
+    const upstream = await fetchWithRetry(origin => {
+      const base =
+        `${origin}/001/2/ch0000009099000000${channelId}/`;
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).end();
-    }
+      return path.includes("?")
+        ? `${base}${path}&${authParams}`
+        : `${base}${path}?${authParams}`;
+    }, req);
 
     // =========================
-    // MPD HANDLING
+    // MPD
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
@@ -132,17 +161,34 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // SEGMENTS (SMOOTH STREAM)
+    // SEGMENTS
     // =========================
     res.status(200);
     res.set({
       "Content-Type": "video/mp4",
-      "Cache-Control": "public, max-age=1",
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
 
+    let lastChunk = Date.now();
+    const STALL_LIMIT = 5000;
+
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastChunk > STALL_LIMIT) {
+        upstream.body.destroy();
+        res.destroy();
+      }
+    }, 1000);
+
+    upstream.body.on("data", () => {
+      lastChunk = Date.now();
+    });
+
     pipeline(upstream.body, res, err => {
+      clearInterval(stallTimer);
       if (err) res.destroy();
     });
 
@@ -156,5 +202,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ Optimized DASH proxy running on port ${PORT}`);
+  console.log(`✅ DASH proxy running on port ${PORT}`);
 });
