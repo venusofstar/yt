@@ -73,7 +73,7 @@ app.get("/:channelId/*", async (req, res) => {
     const targetURL = buildURL(origin, channelId, path, session);
 
     try {
-      // Timeout for stuck segments
+      // Timeout for stuck segments (5s)
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
 
@@ -109,9 +109,9 @@ app.get("/:channelId/*", async (req, res) => {
 
     } catch (err) {
       clearTimeout(timeout);
-      console.warn(`❌ Stream failed or stuck, resetting stream... attempt ${attempt + 1}`, err.message);
+      console.warn(`❌ Segment failed or stuck, rotating fast... attempt ${attempt + 1}`, err.message);
 
-      // Rotate origin & session
+      // Rotate origin & session fast
       originIndex++;
       session = {
         startNumber: rotateStartNumber(),
@@ -119,11 +119,7 @@ app.get("/:channelId/*", async (req, res) => {
         user: rotateUserSession()
       };
       sessions.set(ip, session);
-
-      // Reset stream by redirecting to the same MPD URL
-      if (path.endsWith(".mpd")) {
-        return res.redirect(`${req.protocol}://${req.get("host")}/${channelId}/${path}`);
-      }
+      // Continue to next retry without resetting MPD
     }
   }
 
