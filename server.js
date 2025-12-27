@@ -1,10 +1,3 @@
-/**
- * Fully Optimized DASH Proxy
- * - Fast failover on error or stuck segments
- * - Rotate origin, startNumber, IASHttpSessionId, usersessionid
- * - Preserve m4s_min=1 for origin, bypass for player
- */
-
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
@@ -18,9 +11,7 @@ app.use(cors());
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 500 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 500 });
 
-/* =========================
-   ORIGIN LIST
-========================= */
+/* ORIGINS */
 const ORIGINS = [
   "http://136.239.158.18:6610",
   "http://136.239.158.20:6610",
@@ -32,24 +23,20 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-/* =========================
-   SESSION ROTATION HELPERS
-========================= */
+/* SESSION ROTATION */
 function rotateStartNumber() {
   const base = 46489952;
   const step = 6;
   return base + Math.floor(Math.random() * 100000) * step;
 }
-
 function rotateIAS() {
   return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
 }
-
 function rotateUserSession() {
   return Math.floor(Math.random() * 1e15).toString();
 }
 
-/* CACHE SESSIONS PER IP */
+/* SESSION CACHE PER IP */
 const sessions = new Map();
 function getSession(ip) {
   if (!sessions.has(ip)) {
@@ -62,16 +49,14 @@ function getSession(ip) {
   return sessions.get(ip);
 }
 
-/* BUILD TARGET URL */
+/* BUILD URL */
 function buildURL(origin, channelId, path, session) {
   const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
   const auth = `JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1&NeedJITP=1&isjitp=0&startNumber=${session.startNumber}&filedura=6&ispcode=55&IASHttpSessionId=${session.IAS}&usersessionid=${session.user}`;
   return path.includes("?") ? `${base}${path}&${auth}` : `${base}${path}?${auth}`;
 }
 
-/* =========================
-   ROUTES
-========================= */
+/* ROUTES */
 app.get("/", (_, res) => res.send("✅ DASH Proxy Running"));
 
 app.get("/:channelId/*", async (req, res) => {
@@ -88,7 +73,7 @@ app.get("/:channelId/*", async (req, res) => {
     const targetURL = buildURL(origin, channelId, path, session);
 
     try {
-      // Fast fail on stuck segments (5s timeout)
+      // Timeout for stuck segments
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
 
@@ -101,16 +86,14 @@ app.get("/:channelId/*", async (req, res) => {
 
       if (!upstream.ok) throw new Error(`Upstream ${upstream.status}`);
 
-      // =========================
       // MPD → bypass m4s_min for player
-      // =========================
       if (path.endsWith(".mpd")) {
         let mpd = await upstream.text();
         const baseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
         mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
         mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${baseURL}</BaseURL>`);
-        mpd = mpd.replace(/&m4s_min=1/g, ""); // bypass m4s_min for player
+        mpd = mpd.replace(/&m4s_min=1/g, ""); // bypass for player
 
         res.set({
           "Content-Type": "application/dash+xml",
@@ -120,16 +103,15 @@ app.get("/:channelId/*", async (req, res) => {
         return res.send(mpd);
       }
 
-      // =========================
       // Media segments
-      // =========================
       res.set({ "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Accept-Ranges": "bytes" });
       return upstream.body.pipe(res);
 
     } catch (err) {
       clearTimeout(timeout);
-      console.warn(`❌ Stream failed or stuck, rotating... attempt ${attempt + 1}`, err.message);
-      // Rotate origin & session fast
+      console.warn(`❌ Stream failed or stuck, resetting stream... attempt ${attempt + 1}`, err.message);
+
+      // Rotate origin & session
       originIndex++;
       session = {
         startNumber: rotateStartNumber(),
@@ -137,13 +119,16 @@ app.get("/:channelId/*", async (req, res) => {
         user: rotateUserSession()
       };
       sessions.set(ip, session);
+
+      // Reset stream by redirecting to the same MPD URL
+      if (path.endsWith(".mpd")) {
+        return res.redirect(`${req.protocol}://${req.get("host")}/${channelId}/${path}`);
+      }
     }
   }
 
   res.status(502).send("Stream unavailable after retries");
 });
 
-/* =========================
-   START SERVER
-========================= */
+/* START SERVER */
 app.listen(PORT, () => console.log(`🚀 DASH Proxy running on port ${PORT}`));
