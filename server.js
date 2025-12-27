@@ -62,8 +62,8 @@ function getClientIP(req) {
   return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
 }
 
-/* FETCH SEGMENT WITH FAILOVER */
-async function fetchSegment(channelId, path, ip, maxRetries = 3) {
+/* FETCH SEGMENT WITH FAILOVER ON ERROR ONLY */
+async function fetchSegment(channelId, path, ip, maxRetries = ORIGINS.length) {
   let originIndex = Math.floor(Math.random() * ORIGINS.length);
   let session = getSession(ip);
 
@@ -79,12 +79,12 @@ async function fetchSegment(channelId, path, ip, maxRetries = 3) {
 
       if (!upstream.ok) throw new Error(`Upstream ${upstream.status}`);
 
-      return upstream.body; // Return stream for piping
+      return upstream.body; // Return the stream for piping
 
     } catch (err) {
       clearTimeout(timeout);
       console.warn(`Segment fetch failed (attempt ${attempt + 1}) from ${origin}: ${err.message}`);
-      // Rotate session & origin
+      // Rotate session & try next origin
       originIndex++;
       session = {
         startNumber: rotateStartNumber(),
@@ -106,7 +106,7 @@ app.get("/:channelId/*", async (req, res) => {
 
   if (path.endsWith(".mpd")) {
     try {
-      // For MPD, fetch first available origin
+      // Fetch MPD from first available origin only
       let originIndex = Math.floor(Math.random() * ORIGINS.length);
       let session = getSession(ip);
 
@@ -119,10 +119,9 @@ app.get("/:channelId/*", async (req, res) => {
           const upstream = await fetch(url, { agent, headers: { "User-Agent": "OTT", "Accept": "*/*" } });
           if (!upstream.ok) throw new Error(`Upstream ${upstream.status}`);
           mpdText = await upstream.text();
-          break; // Success
+          break;
         } catch (err) {
           console.warn(`MPD fetch failed from ${origin}: ${err.message}`);
-          // rotate session
           session = {
             startNumber: rotateStartNumber(),
             IAS: rotateIAS(),
@@ -151,7 +150,7 @@ app.get("/:channelId/*", async (req, res) => {
     res.set({ "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Accept-Ranges": "bytes" });
 
     try {
-      const segmentStream = await fetchSegment(channelId, path, ip, 5); // 5 retries per segment
+      const segmentStream = await fetchSegment(channelId, path, ip, ORIGINS.length);
       segmentStream.on("error", err => {
         console.warn("Stream chunk error:", err.message);
         res.end();
