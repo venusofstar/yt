@@ -32,7 +32,7 @@ const ORIGINS = [
 ];
 
 // =========================
-// PER-CHANNEL SESSION (STICKY)
+// PER-CHANNEL SESSION
 // =========================
 const channelSessions = new Map();
 
@@ -56,11 +56,13 @@ function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// cleanup every 10 min
+// =========================
+// CLEANUP
+// =========================
 setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 
 // =========================
-// FETCH WITH STICKY ORIGIN
+// FETCH SEGMENT
 // =========================
 async function fetchSegment(urlBuilder, req, session) {
   for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
@@ -88,20 +90,13 @@ async function fetchSegment(urlBuilder, req, session) {
 
     } catch (err) {
       console.warn("⚠️ Segment failed:", ORIGINS[session.originIndex], "→ skip to next segment");
-      rotateOrigin(session);      // rotate to next origin
-      session.startNumber += 1;   // skip failed segment
+      rotateOrigin(session);
+      session.startNumber += 1; // skip failed segment
     }
   }
 
   throw new Error("All origins failed for this segment");
 }
-
-// =========================
-// HOME
-// =========================
-app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (Sticky Origin, m4s_min=1, skip failed segments)");
-});
 
 // =========================
 // DASH PROXY
@@ -128,9 +123,7 @@ app.get("/:channelId/*", async (req, res) => {
     const upstream = await fetchSegment(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
       const url = new URL(path, base.startsWith("http") ? base : `http://${base}`);
-
       Object.entries(baseAuthParams).forEach(([k, v]) => url.searchParams.set(k, v));
-
       return url.toString();
     }, req, session);
 
@@ -141,8 +134,12 @@ app.get("/:channelId/*", async (req, res) => {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
+      // Remove old BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
       mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
+
+      // ✅ Update SegmentTimeline start numbers to current session.startNumber
+      mpd = mpd.replace(/startNumber="\d+"/g, `startNumber="${session.startNumber}"`);
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -170,7 +167,7 @@ app.get("/:channelId/*", async (req, res) => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
         console.warn("⚠️ Segment stall detected → skip to next segment");
         rotateOrigin(session);
-        session.startNumber += 1;  // skip stalled segment
+        session.startNumber += 1;
         upstream.body.destroy();
         res.destroy();
       }
@@ -183,12 +180,12 @@ app.get("/:channelId/*", async (req, res) => {
       if (err) res.destroy();
     });
 
-    // ✅ increment startNumber for next segment automatically
+    // ✅ Increment startNumber for next segment immediately
     session.startNumber += 1;
 
   } catch (err) {
     console.error("❌ Proxy error:", err.message, "→ skip segment");
-    session.startNumber += 1; // skip failed segment
+    session.startNumber += 1;
     res.status(502).end();
   }
 });
