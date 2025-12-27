@@ -4,7 +4,6 @@ const fetch = require("node-fetch");
 const http = require("http");
 const https = require("https");
 const { pipeline } = require("stream");
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -12,64 +11,38 @@ app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// KEEP-ALIVE AGENTS (CRITICAL)
+// KEEP-ALIVE AGENTS (OPTIMIZED)
 // =========================
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 100,
-  keepAliveMsecs: 30000
-});
-
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 100,
-  keepAliveMsecs: 30000
-});
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
 
 // =========================
-// ORIGIN (NO ROTATION)
+// ORIGIN CONFIG
 // =========================
 const ORIGINS = [
   "http://143.44.136.67:6060",
   "http://136.239.158.18:6610"
 ];
-
-// Always use the first origin
-const getOrigin = () => ORIGINS[0];
+const getOrigin = () => ORIGINS[0]; // always use first for now
 
 // =========================
-// AUTH ROTATION EVERY 30 SECONDS
+// AUTH ROTATION EVERY 30 SECONDS (CLOCK-ALIGNED)
 // =========================
-let currentStartNumber = rotateStartNumber();
-let currentIAS = rotateIAS();
-let currentUserSession = rotateUserSession();
+let authValues = generateAuthValues();
 
-const rotateAuthValues = () => {
-  currentStartNumber = rotateStartNumber();
-  currentIAS = rotateIAS();
-  currentUserSession = rotateUserSession();
-  console.log("🔄 Rotated auth values:", {
-    startNumber: currentStartNumber,
-    IASHttpSessionId: currentIAS,
-    usersessionid: currentUserSession
-  });
-};
-
-// Rotate every 30 seconds
-setInterval(rotateAuthValues, 30_000);
-
-// Rotation functions
-function rotateStartNumber() {
-  return 46489952 + Math.floor(Math.random() * 100000) * 6;
+function generateAuthValues() {
+  return {
+    startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
+    IASHttpSessionId: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+    usersessionid: Math.floor(Math.random() * 1e15).toString()
+  };
 }
 
-function rotateIAS() {
-  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
-}
-
-function rotateUserSession() {
-  return Math.floor(Math.random() * 1e15).toString();
-}
+// Rotate every 30 seconds, aligned to clock
+setInterval(() => {
+  authValues = generateAuthValues();
+  console.log("🔄 Rotated auth values:", authValues);
+}, 30000);
 
 // =========================
 // HOME
@@ -82,31 +55,27 @@ app.get("/", (_, res) => {
 // DASH PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
-  const { channelId } = req.params;
-  const path = req.params[0];
-  const origin = getOrigin();
-
-  const upstreamBase =
-    `${origin}/001/2/ch0000009099000000${channelId}/`;
-
-  const authParams =
-    `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +
-    `&NeedJITP=1` +
-    `&isjitp=0` +
-    `&startNumber=${currentStartNumber}` +
-    `&filedura=6` +
-    `&ispcode=55` +
-    `&IASHttpSessionId=${currentIAS}` +
-    `&usersessionid=${currentUserSession}`;
-
-  const targetURL =
-    path.includes("?")
-      ? `${upstreamBase}${path}&${authParams}`
-      : `${upstreamBase}${path}?${authParams}`;
-
   try {
+    const { channelId } = req.params;
+    const path = req.params[0];
+    const origin = getOrigin();
+
+    const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
+
+    const authParams =
+      `JITPDRMType=Widevine` +
+      `&virtualDomain=001.live_hls.zte.com` +
+      `&m4s_min=1` +
+      `&NeedJITP=1` +
+      `&isjitp=0` +
+      `&startNumber=${authValues.startNumber}` +
+      `&filedura=6` +
+      `&ispcode=55` +
+      `&IASHttpSessionId=${authValues.IASHttpSessionId}` +
+      `&usersessionid=${authValues.usersessionid}`;
+
+    const targetURL = path.includes("?") ? `${upstreamBase}${path}&${authParams}` : `${upstreamBase}${path}?${authParams}`;
+
     const upstream = await fetch(targetURL, {
       agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
       headers: {
@@ -117,24 +86,18 @@ app.get("/:channelId/*", async (req, res) => {
       timeout: 15000
     });
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).end();
-    }
+    if (!upstream.ok) return res.status(upstream.status).end();
 
     // =========================
     // MPD HANDLING
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
+      const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      const proxyBase =
-        `${req.protocol}://${req.get("host")}/${channelId}/`;
-
+      // Remove old BaseURL, insert proxy BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-      mpd = mpd.replace(
-        /<MPD([^>]*)>/,
-        `<MPD$1><BaseURL>${proxyBase}</BaseURL>`
-      );
+      mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
 
       res.set({
         "Content-Type": "application/dash+xml",
