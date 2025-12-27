@@ -22,9 +22,7 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-// pick ONE origin at startup
-const SELECTED_ORIGIN =
-  ORIGINS[Math.floor(Math.random() * ORIGINS.length)];
+const SELECTED_ORIGIN = ORIGINS[Math.floor(Math.random() * ORIGINS.length)];
 
 // =========================
 // AUTH VALUES (ROTATE ON RELOAD)
@@ -35,13 +33,10 @@ const START_NUMBER = (() => {
   return base + Math.floor(Math.random() * 100000) * step;
 })();
 
-const IAS_SESSION =
-  "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+const IAS_SESSION = "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+const USER_SESSION = Math.floor(Math.random() * 1e15).toString();
 
-const USER_SESSION =
-  Math.floor(Math.random() * 1e15).toString();
-
-// log once so you know what was chosen
+// Log startup values
 console.log("🔁 Origin:", SELECTED_ORIGIN);
 console.log("▶ StartNumber:", START_NUMBER);
 console.log("🔐 IAS:", IAS_SESSION);
@@ -51,18 +46,17 @@ console.log("👤 UserSession:", USER_SESSION);
 // HOME
 // =========================
 app.get("/", (req, res) => {
-  res.send("✅ DASH MPD → MPD Proxy is running");
+  res.send("✅ DASH Proxy is running");
 });
 
 // =========================
-// FULL DASH PROXY (MPD + SEGMENTS)
+// DASH PROXY (MPD + SEGMENTS)
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
-  const path = req.params[0]; // .mpd OR .m4s/.mp4
+  const path = req.params[0]; // manifest.mpd or .m4s/.mp4
 
-  const upstreamBase =
-    `${SELECTED_ORIGIN}/001/2/ch0000009099000000${channelId}/`;
+  const upstreamBase = `${SELECTED_ORIGIN}/001/2/ch0000009099000000${channelId}/`;
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -76,10 +70,9 @@ app.get("/:channelId/*", async (req, res) => {
     `&IASHttpSessionId=${IAS_SESSION}` +
     `&usersessionid=${USER_SESSION}`;
 
-  const targetURL =
-    path.includes("?")
-      ? `${upstreamBase}${path}&${authParams}`
-      : `${upstreamBase}${path}?${authParams}`;
+  const targetURL = path.includes("?")
+    ? `${upstreamBase}${path}&${authParams}`
+    : `${upstreamBase}${path}?${authParams}`;
 
   try {
     const upstream = await fetch(targetURL, {
@@ -87,27 +80,26 @@ app.get("/:channelId/*", async (req, res) => {
         "User-Agent": req.headers["user-agent"] || "OTT",
         "Accept": "*/*",
         "Connection": "keep-alive"
-      }
+      },
+      timeout: 0 // prevent fetch timeout
     });
 
     if (!upstream.ok) {
-      console.error("❌ Upstream error:", upstream.status);
+      console.error("❌ Upstream error:", upstream.status, targetURL);
       return res.status(upstream.status).end();
     }
 
     // =========================
-    // MPD → BaseURL REWRITE
+    // MPD → rewrite BaseURL
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
+      const proxyBaseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      const proxyBaseURL =
-        `${req.protocol}://${req.get("host")}/${channelId}/`;
-
-      // remove ALL existing BaseURL
+      // Remove all existing <BaseURL>
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
 
-      // inject proxy BaseURL
+      // Inject proxy BaseURL
       mpd = mpd.replace(
         /<MPD([^>]*)>/,
         `<MPD$1><BaseURL>${proxyBaseURL}</BaseURL>`
@@ -128,14 +120,20 @@ app.get("/:channelId/*", async (req, res) => {
     // =========================
     res.status(upstream.status);
     res.set({
+      "Content-Type": upstream.headers.get("content-type") || "application/octet-stream",
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Connection": "keep-alive"
     });
 
+    // Disable Node buffering
+    req.socket.setNoDelay(true);
+
+    // Stream upstream → client
     upstream.body.pipe(res);
 
   } catch (err) {
-    console.error("❌ DASH Proxy Error:", err.message);
+    console.error("❌ DASH Proxy Error:", err.message, targetURL);
     res.status(502).end();
   }
 });
@@ -144,5 +142,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ DASH Proxy running on port ${PORT}`);
 });
