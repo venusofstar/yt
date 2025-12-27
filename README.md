@@ -1,16 +1,15 @@
-# NGINX DASH Optimized Config
+# DASH Streaming Server
 
-High-performance NGINX configuration for DASH streaming.
+Fast DASH MPD + segment proxy using Node.js and NGINX.
 
 ## Features
-- HTTP/2 ready
-- Optimized for .mpd and .m4s
+- DASH (.mpd, .m4s)
+- Session pinning
+- HTTP/2 via NGINX
 - Low latency
-- High connection limits
-- Production safe
+- Production ready
 
-## Usage
-Replace your `/etc/nginx/nginx.conf` with this file, then reload nginx:
-
+## Install
 ```bash
-nginx -t && systemctl reload nginx
+npm install
+npm start
