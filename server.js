@@ -40,9 +40,9 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-const ROTATE_INTERVAL = 60 * 1000; // 1 minute
 let originIndex = 0;
 let lastRotateTime = Date.now();
+const ROTATE_INTERVAL = 60 * 1000; // 1 minute
 
 const getOrigin = () => {
   const now = Date.now();
@@ -50,7 +50,6 @@ const getOrigin = () => {
   if (now - lastRotateTime >= ROTATE_INTERVAL) {
     originIndex = (originIndex + 1) % ORIGINS.length;
     lastRotateTime = now;
-    console.log("🔄 Origin rotated to:", ORIGINS[originIndex]);
   }
 
   return ORIGINS[originIndex];
@@ -144,7 +143,7 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // SEGMENTS (SMOOTH STREAM)
+    // SEGMENTS
     // =========================
     res.status(200);
     res.set({
