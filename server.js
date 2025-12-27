@@ -26,23 +26,15 @@ const ORIGINS = [
 const getOrigin = () => ORIGINS[0]; // always use first for now
 
 // =========================
-// AUTH ROTATION EVERY 30 SECONDS (CLOCK-ALIGNED)
+// AUTH VALUES (STATIC UNTIL SERVER RELOAD)
 // =========================
-let authValues = generateAuthValues();
+const authValues = {
+  startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
+  IASHttpSessionId: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+  usersessionid: Math.floor(Math.random() * 1e15).toString()
+};
 
-function generateAuthValues() {
-  return {
-    startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
-    IASHttpSessionId: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    usersessionid: Math.floor(Math.random() * 1e15).toString()
-  };
-}
-
-// Rotate every 30 seconds, aligned to clock
-setInterval(() => {
-  authValues = generateAuthValues();
-  console.log("🔄 Rotated auth values:", authValues);
-}, 30000);
+console.log("🔑 Static auth values (reload to rotate):", authValues);
 
 // =========================
 // HOME
@@ -95,7 +87,6 @@ app.get("/:channelId/*", async (req, res) => {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Remove old BaseURL, insert proxy BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
       mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
 
