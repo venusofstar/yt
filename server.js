@@ -55,7 +55,7 @@ function rotateUserSession() {
 // HOME
 // =========================
 app.get("/", (req, res) => {
-  res.send("✅ DASH MPD → MPD Proxy is running");
+  res.send("✅ DASH MPD → MPD Proxy with Full Rotation is running");
 });
 
 // =========================
@@ -66,12 +66,12 @@ app.get("/:channelId/*", async (req, res) => {
   const path = req.params[0]; // manifest.mpd OR .m4s/.mp4
 
   // Rotate origin only for manifest reload
-  const rotate = path.endsWith(".mpd");
-  const origin = getOrigin(channelId, rotate);
+  const rotateOrigin = path.endsWith(".mpd");
+  const origin = getOrigin(channelId, rotateOrigin);
 
-  const upstreamBase =
-    `${origin}/001/2/ch0000009099000000${channelId}/`;
+  const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
 
+  // Rotate auth parameters on EVERY request
   const authParams =
     `JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
@@ -150,5 +150,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT} with full rotation enabled`);
 });
