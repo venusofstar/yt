@@ -62,7 +62,7 @@ setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 // =========================
 // FETCH WITH STICKY ORIGIN
 // =========================
-async function fetchSticky(urlBuilder, req, session) {
+async function fetchSegment(urlBuilder, req, session) {
   for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
     const origin = ORIGINS[session.originIndex];
     const url = urlBuilder(origin);
@@ -87,20 +87,20 @@ async function fetchSticky(urlBuilder, req, session) {
       return res;
 
     } catch (err) {
-      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
-      rotateOrigin(session); // rotate only on error
-      session.startNumber += 1; // 🔥 increment startNumber on error
+      console.warn("⚠️ Segment failed:", ORIGINS[session.originIndex], "→ skip to next segment");
+      rotateOrigin(session);      // rotate to next origin
+      session.startNumber += 1;   // skip failed segment
     }
   }
 
-  throw new Error("All origins failed");
+  throw new Error("All origins failed for this segment");
 }
 
 // =========================
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (Sticky Origin, m4s_min=1, Auto startNumber increment)");
+  res.send("✅ DASH Proxy (Sticky Origin, m4s_min=1, skip failed segments)");
 });
 
 // =========================
@@ -114,7 +114,7 @@ app.get("/:channelId/*", async (req, res) => {
   const baseAuthParams = {
     JITPDRMType: "Widevine",
     virtualDomain: "001.live_hls.zte.com",
-    m4s_min: "1", // ✅ enforce
+    m4s_min: "1",
     NeedJITP: "1",
     isjitp: "0",
     startNumber: session.startNumber,
@@ -125,11 +125,10 @@ app.get("/:channelId/*", async (req, res) => {
   };
 
   try {
-    const upstream = await fetchSticky(origin => {
+    const upstream = await fetchSegment(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
       const url = new URL(path, base.startsWith("http") ? base : `http://${base}`);
 
-      // Merge auth parameters
       Object.entries(baseAuthParams).forEach(([k, v]) => url.searchParams.set(k, v));
 
       return url.toString();
@@ -169,9 +168,9 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Segment stall detected, rotating origin and incrementing startNumber");
+        console.warn("⚠️ Segment stall detected → skip to next segment");
         rotateOrigin(session);
-        session.startNumber += 1; // 🔥 increment startNumber on stall
+        session.startNumber += 1;  // skip stalled segment
         upstream.body.destroy();
         res.destroy();
       }
@@ -184,9 +183,12 @@ app.get("/:channelId/*", async (req, res) => {
       if (err) res.destroy();
     });
 
+    // ✅ increment startNumber for next segment automatically
+    session.startNumber += 1;
+
   } catch (err) {
-    console.error("❌ Proxy error:", err.message);
-    session.startNumber += 1; // 🔥 increment startNumber on general failure
+    console.error("❌ Proxy error:", err.message, "→ skip segment");
+    session.startNumber += 1; // skip failed segment
     res.status(502).end();
   }
 });
