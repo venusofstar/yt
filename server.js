@@ -47,16 +47,25 @@ const getOrigin = () =>
 const MAX_RETRIES = ORIGINS.length;
 
 // =========================
-// AUTH ROTATION
+// PER-CHANNEL SESSION (CRITICAL FIX)
 // =========================
-const rotateStartNumber = () =>
-  46489952 + Math.floor(Math.random() * 100000) * 6;
+const channelSessions = new Map();
 
-const rotateIAS = () =>
-  "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+function getChannelSession(channelId) {
+  if (!channelSessions.has(channelId)) {
+    channelSessions.set(channelId, {
+      startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
+      IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+      userSession: Math.floor(Math.random() * 1e15).toString()
+    });
+  }
+  return channelSessions.get(channelId);
+}
 
-const rotateUserSession = () =>
-  Math.floor(Math.random() * 1e15).toString();
+// cleanup every 10 minutes (prevents expiry issues)
+setInterval(() => {
+  channelSessions.clear();
+}, 10 * 60 * 1000);
 
 // =========================
 // FETCH WITH ORIGIN RETRY
@@ -90,7 +99,6 @@ async function fetchWithRetry(urlBuilder, req) {
       }
 
       return upstream;
-
     } catch (err) {
       lastError = err.message;
     }
@@ -103,7 +111,7 @@ async function fetchWithRetry(urlBuilder, req) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy with Auto-Origin Reload");
+  res.send("✅ DASH Proxy (NO LOOP / AUTO ORIGIN)");
 });
 
 // =========================
@@ -112,6 +120,7 @@ app.get("/", (_, res) => {
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
+  const session = getChannelSession(channelId);
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -119,11 +128,11 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${rotateStartNumber()}` +
+    `&startNumber=${session.startNumber}` + // ✅ STABLE
     `&filedura=6` +
     `&ispcode=55` +
-    `&IASHttpSessionId=${rotateIAS()}` +
-    `&usersessionid=${rotateUserSession()}`;
+    `&IASHttpSessionId=${session.IAS}` +
+    `&usersessionid=${session.userSession}`;
 
   try {
     const upstream = await fetchWithRetry(origin => {
