@@ -1,23 +1,26 @@
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
 const http = require("http");
-const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// =========================
+// BASIC MIDDLEWARE
+// =========================
 app.use(cors());
 
-/* =========================
-   KEEP-ALIVE AGENTS
-========================= */
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200 });
+// =========================
+// KEEP-ALIVE AGENT
+// =========================
+const agent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 100
+});
 
-/* =========================
-   ORIGIN ROTATION
-========================= */
+// =========================
+// ORIGIN ROTATION
+// =========================
 const ORIGINS = [
   "http://136.239.158.18:6610",
   "http://136.239.158.20:6610",
@@ -30,45 +33,57 @@ const ORIGINS = [
 ];
 
 let originIndex = 0;
-const getOrigin = () => ORIGINS[originIndex++ % ORIGINS.length];
-
-/* =========================
-   SESSION PINNING (IMPORTANT)
-========================= */
-const sessions = new Map();
-
-function newSession() {
-  return {
-    ts: Date.now(),
-    startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
-    IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    user: Math.floor(Math.random() * 1e15).toString()
-  };
+function getOrigin() {
+  const origin = ORIGINS[originIndex];
+  originIndex = (originIndex + 1) % ORIGINS.length;
+  return origin;
 }
 
-function getSession(ip) {
-  const TTL = 60_000; // 60 seconds
-  if (!sessions.has(ip) || Date.now() - sessions.get(ip).ts > TTL) {
-    sessions.set(ip, newSession());
+// =========================
+// AUTH ROTATION (STABLE)
+// =========================
+const startNumbers = new Map();
+
+function getStartNumber(channelId) {
+  if (!startNumbers.has(channelId)) {
+    const base = 46489952;
+    const step = 6;
+    startNumbers.set(
+      channelId,
+      base + Math.floor(Math.random() * 100000) * step
+    );
   }
-  return sessions.get(ip);
+  return startNumbers.get(channelId);
 }
 
-/* =========================
-   HOME
-========================= */
-app.get("/", (req, res) => {
-  res.send("✅ DASH MPD Proxy running");
+function rotateIAS() {
+  return "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+}
+
+function rotateUserSession() {
+  return Math.floor(Math.random() * 1e15).toString();
+}
+
+// =========================
+// HOME
+// =========================
+app.get("/", (_, res) => {
+  res.send("✅ DASH MPD → Segment Proxy is running");
 });
 
-/* =========================
-   DASH PROXY
-========================= */
+// =========================
+// FULL DASH PROXY
+// =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
+
+  // Channel validation
+  if (!/^\d+$/.test(channelId)) {
+    return res.status(400).end("Invalid channelId");
+  }
+
   const origin = getOrigin();
-  const s = getSession(req.ip);
 
   const upstreamBase =
     `${origin}/001/2/ch0000009099000000${channelId}/`;
@@ -79,71 +94,92 @@ app.get("/:channelId/*", async (req, res) => {
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
-    `&startNumber=${s.startNumber}` +
+    `&startNumber=${getStartNumber(channelId)}` +
     `&filedura=6` +
     `&ispcode=55` +
-    `&IASHttpSessionId=${s.IAS}` +
-    `&usersessionid=${s.user}`;
+    `&IASHttpSessionId=${rotateIAS()}` +
+    `&usersessionid=${rotateUserSession()}`;
 
   const targetURL =
     path.includes("?")
       ? `${upstreamBase}${path}&${authParams}`
       : `${upstreamBase}${path}?${authParams}`;
 
+  // Fetch timeout protection
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
   try {
     const upstream = await fetch(targetURL, {
-      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
+      agent,
+      signal: controller.signal,
       headers: {
         "User-Agent": req.headers["user-agent"] || "OTT",
-        "Accept": "*/*"
-      },
-      timeout: 15000
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+      }
     });
 
+    clearTimeout(timeout);
+
     if (!upstream.ok) {
+      console.error("❌ Upstream error:", upstream.status);
       return res.status(upstream.status).end();
     }
 
-    /* ===== MPD ===== */
+    // =========================
+    // MPD HANDLING
+    // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
 
-      const baseURL =
+      const proxyBaseURL =
         `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
+      // Remove all existing BaseURL tags
+      mpd = mpd.replace(/<BaseURL>[\s\S]*?<\/BaseURL>/g, "");
+
+      // Inject proxy BaseURL safely
       mpd = mpd.replace(
-        /<MPD([^>]*)>/,
-        `<MPD$1><BaseURL>${baseURL}</BaseURL>`
+        /<MPD\b[^>]*>/,
+        match => `${match}<BaseURL>${proxyBaseURL}</BaseURL>`
       );
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
         "Access-Control-Allow-Origin": "*"
       });
 
       return res.send(mpd);
     }
 
-    /* ===== SEGMENTS ===== */
+    // =========================
+    // MEDIA SEGMENTS
+    // =========================
+    upstream.headers.forEach((value, key) => {
+      if (!["transfer-encoding", "content-encoding"].includes(key)) {
+        res.setHeader(key, value);
+      }
+    });
+
     res.set({
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Accept-Ranges": "bytes"
+      "Access-Control-Allow-Origin": "*"
     });
 
     upstream.body.pipe(res);
 
   } catch (err) {
-    console.error("DASH error:", err.message);
+    console.error("❌ DASH Proxy Error:", err.message);
     res.status(502).end();
   }
 });
 
-/* =========================
-   START
-========================= */
+// =========================
+// START SERVER
+// =========================
 app.listen(PORT, () => {
-  console.log(`🚀 DASH proxy running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
