@@ -1,33 +1,15 @@
-/**
- * Fully Optimized DASH Proxy
- * Features:
- * - Origin rotation
- * - startNumber, IASHttpSessionId, usersessionid rotation
- * - m4s_min bypassed for player
- * - Keep-alive for fast segment fetch
- * - Minimal buffering
- */
-
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const http = require("http");
-const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+const agent = new http.Agent({ keepAlive: true, maxSockets: 500 });
 
-/* =========================
-   Keep-Alive Agents
-========================= */
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 500 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 500 });
-
-/* =========================
-   ORIGIN ROTATION
-========================= */
+/* ORIGIN LIST */
 const ORIGINS = [
   "http://136.239.158.18:6610",
   "http://136.239.158.20:6610",
@@ -39,14 +21,7 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
-let originIndex = 0;
-const getOrigin = () => ORIGINS[originIndex++ % ORIGINS.length];
-
-/* =========================
-   Session Rotation
-========================= */
-const sessions = new Map(); // IP → session cache
-
+/* SESSION ROTATION HELPERS */
 function rotateStartNumber() {
   const base = 46489952;
   const step = 6;
@@ -61,11 +36,11 @@ function rotateUserSession() {
   return Math.floor(Math.random() * 1e15).toString();
 }
 
+/* CACHE PER IP */
+const sessions = new Map();
 function getSession(ip) {
-  const TTL = 60_000; // 60s cache
-  if (!sessions.has(ip) || Date.now() - sessions.get(ip).ts > TTL) {
+  if (!sessions.has(ip)) {
     sessions.set(ip, {
-      ts: Date.now(),
       startNumber: rotateStartNumber(),
       IAS: rotateIAS(),
       user: rotateUserSession()
@@ -74,85 +49,62 @@ function getSession(ip) {
   return sessions.get(ip);
 }
 
-/* =========================
-   Routes
-========================= */
-app.get("/", (_, res) => res.send("✅ DASH Proxy Running"));
+/* BUILD URL */
+function buildURL(origin, channelId, path, session) {
+  const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
+  const auth = `JITPDRMType=Widevine&virtualDomain=001.live_hls.zte.com&m4s_min=1&NeedJITP=1&isjitp=0&startNumber=${session.startNumber}&filedura=6&ispcode=55&IASHttpSessionId=${session.IAS}&usersessionid=${session.user}`;
+  return path.includes("?") ? `${base}${path}&${auth}` : `${base}${path}?${auth}`;
+}
 
+/* ROUTE */
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
-  const origin = getOrigin();
-  const s = getSession(req.ip);
+  const ip = req.ip;
 
-  const upstreamBase = `${origin}/001/2/ch0000009099000000${channelId}/`;
+  let originIndex = 0;
+  let session = getSession(ip);
 
-  // ⚡ Must keep m4s_min=1 for origin
-  const originAuth =
-    `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` + // required
-    `&NeedJITP=1` +
-    `&isjitp=0` +
-    `&startNumber=${s.startNumber}` +
-    `&filedura=6` +
-    `&ispcode=55` +
-    `&IASHttpSessionId=${s.IAS}` +
-    `&usersessionid=${s.user}`;
+  const maxRetries = 3;
 
-  const targetURL =
-    path.includes("?")
-      ? `${upstreamBase}${path}&${originAuth}`
-      : `${upstreamBase}${path}?${originAuth}`;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const origin = ORIGINS[originIndex % ORIGINS.length];
+    const url = buildURL(origin, channelId, path, session);
 
-  try {
-    const upstream = await fetch(targetURL, {
-      agent: targetURL.startsWith("https") ? httpsAgent : httpAgent,
-      headers: { "User-Agent": req.headers["user-agent"] || "OTT", "Accept": "*/*" }
-    });
+    try {
+      const upstream = await fetch(url, { agent, headers: { "User-Agent": "OTT", "Accept": "*/*" } });
 
-    if (!upstream.ok) return res.sendStatus(upstream.status);
+      if (!upstream.ok) throw new Error(`Upstream error ${upstream.status}`);
 
-    // =========================
-    // MPD → bypass m4s_min for player
-    // =========================
-    if (path.endsWith(".mpd")) {
-      let mpd = await upstream.text();
-      const baseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
+      if (path.endsWith(".mpd")) {
+        let mpd = await upstream.text();
+        const baseURL = `${req.protocol}://${req.get("host")}/${channelId}/`;
+        mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
+        mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${baseURL}</BaseURL>`);
+        mpd = mpd.replace(/&m4s_min=1/g, ""); // bypass m4s_min for player
+        res.set({ "Content-Type": "application/dash+xml", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+        return res.send(mpd);
+      }
 
-      // Remove existing BaseURL and inject proxy URL
-      mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-      mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${baseURL}</BaseURL>`);
+      // Media segments
+      res.set({ "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Accept-Ranges": "bytes" });
+      return upstream.body.pipe(res);
 
-      // ⚡ Bypass m4s_min for the player
-      mpd = mpd.replace(/&m4s_min=1/g, "");
-
-      res.set({
-        "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
-        "Access-Control-Allow-Origin": "*"
-      });
-      return res.send(mpd);
+    } catch (err) {
+      console.warn(`❌ Attempt ${attempt + 1} failed: ${err.message}`);
+      // rotate origin and session
+      originIndex++;
+      session = {
+        startNumber: rotateStartNumber(),
+        IAS: rotateIAS(),
+        user: rotateUserSession()
+      };
+      sessions.set(ip, session);
     }
-
-    // =========================
-    // Segments
-    // =========================
-    res.set({
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Accept-Ranges": "bytes"
-    });
-
-    upstream.body.pipe(res);
-
-  } catch (err) {
-    console.error("DASH Proxy Error:", err.message);
-    res.sendStatus(502);
   }
+
+  res.status(502).send("Stream unavailable after retries");
 });
 
-/* =========================
-   Start Server
-========================= */
+/* START SERVER */
 app.listen(PORT, () => console.log(`🚀 DASH Proxy running on port ${PORT}`));
