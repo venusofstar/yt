@@ -27,7 +27,7 @@ const httpsAgent = new https.Agent({
 });
 
 // =========================
-// ORIGIN ROTATION
+// ORIGIN ROTATION (1 MINUTE)
 // =========================
 const ORIGINS = [
   "http://136.239.158.18:6610",
@@ -40,9 +40,21 @@ const ORIGINS = [
   "http://136.239.159.20:6610"
 ];
 
+const ROTATE_INTERVAL = 60 * 1000; // 1 minute
 let originIndex = 0;
-const getOrigin = () =>
-  ORIGINS[(originIndex = (originIndex + 1) % ORIGINS.length)];
+let lastRotateTime = Date.now();
+
+const getOrigin = () => {
+  const now = Date.now();
+
+  if (now - lastRotateTime >= ROTATE_INTERVAL) {
+    originIndex = (originIndex + 1) % ORIGINS.length;
+    lastRotateTime = now;
+    console.log("🔄 Origin rotated to:", ORIGINS[originIndex]);
+  }
+
+  return ORIGINS[originIndex];
+};
 
 // =========================
 // AUTH ROTATION
