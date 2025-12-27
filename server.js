@@ -63,13 +63,27 @@ function getSession(channelId) {
   return channelSessions.get(channelId);
 }
 
-function rotateOriginAndWindow(session) {
+// =========================
+// HARD ROTATION (FULL RESET)
+// =========================
+function hardRotate(session, reason = "unknown") {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 
-  // jump forward 2–4 segments
-  session.startNumber += 6 * (2 + Math.floor(Math.random() * 3));
+  // jump far ahead → fresh live window
+  session.startNumber += 6 * (5 + Math.floor(Math.random() * 5));
 
-  console.log("🔄 ROTATE + ADVANCE", session.originIndex, session.startNumber);
+  // regenerate session IDs
+  session.IAS = "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+  session.userSession = Math.floor(Math.random() * 1e15).toString();
+
+  // reset loop detection
+  session.lastSegment = null;
+  session.repeatCount = 0;
+
+  console.log("🔥 HARD ROTATE:", reason, {
+    origin: session.originIndex,
+    startNumber: session.startNumber
+  });
 }
 
 // cleanup every 10 min
@@ -98,12 +112,17 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
+
+      if ([403, 404, 410].includes(res.status)) {
+        throw new Error("Hard fail " + res.status);
+      }
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       return res;
     } catch (err) {
       console.error("⚠️ ORIGIN FAIL:", origin);
-      rotateOriginAndWindow(session);
+      hardRotate(session, "origin-fail");
     }
   }
   throw new Error("All origins failed");
@@ -113,7 +132,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (Sticky + Anti Loop)");
+  res.send("✅ DASH Proxy (Hard Rotate + No Cache)");
 });
 
 // =========================
@@ -134,8 +153,7 @@ app.get("/:channelId/*", async (req, res) => {
       if (session.lastSegment === seg) {
         session.repeatCount++;
         if (session.repeatCount >= 2) {
-          rotateOriginAndWindow(session);
-          session.repeatCount = 0;
+          hardRotate(session, "segment-loop");
         }
       } else {
         session.lastSegment = seg;
@@ -182,7 +200,9 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
         "Access-Control-Allow-Origin": "*"
       });
 
@@ -194,7 +214,9 @@ app.get("/:channelId/*", async (req, res) => {
     // =========================
     res.set({
       "Content-Type": "video/mp4",
-      "Cache-Control": "no-store",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
@@ -204,7 +226,7 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        rotateOriginAndWindow(session);
+        hardRotate(session, "segment-stall");
         upstream.body.destroy();
         res.destroy();
       }
@@ -221,6 +243,7 @@ app.get("/:channelId/*", async (req, res) => {
 
   } catch (err) {
     console.error("❌ PROXY ERROR:", err.message);
+    hardRotate(session, "fatal-error");
     res.status(502).end();
   }
 });
