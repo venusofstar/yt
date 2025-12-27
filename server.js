@@ -14,8 +14,17 @@ app.use(express.raw({ type: "*/*" }));
 // =========================
 // KEEP-ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
 
 // =========================
 // ORIGINS
@@ -32,7 +41,7 @@ const ORIGINS = [
 ];
 
 // =========================
-// PER-CHANNEL SESSION
+// PER-CHANNEL SESSION (STICKY)
 // =========================
 const channelSessions = new Map();
 
@@ -56,15 +65,13 @@ function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// =========================
-// CLEANUP
-// =========================
+// cleanup every 10 min
 setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 
 // =========================
-// FETCH SEGMENT
+// FETCH WITH STICKY ORIGIN
 // =========================
-async function fetchSegment(urlBuilder, req, session) {
+async function fetchSticky(urlBuilder, req, session) {
   for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
     const origin = ORIGINS[session.originIndex];
     const url = urlBuilder(origin);
@@ -89,14 +96,20 @@ async function fetchSegment(urlBuilder, req, session) {
       return res;
 
     } catch (err) {
-      console.warn("⚠️ Segment failed:", ORIGINS[session.originIndex], "→ skip to next segment");
-      rotateOrigin(session);
-      session.startNumber += 1; // skip failed segment
+      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
+      rotateOrigin(session); // rotate only on error
     }
   }
 
-  throw new Error("All origins failed for this segment");
+  throw new Error("All origins failed");
 }
+
+// =========================
+// HOME
+// =========================
+app.get("/", (_, res) => {
+  res.send("✅ DASH Proxy (Stable m4s_min=1, Auto Segment Skip)");
+});
 
 // =========================
 // DASH PROXY
@@ -106,25 +119,24 @@ app.get("/:channelId/*", async (req, res) => {
   const path = req.params[0];
   const session = getSession(channelId);
 
-  const baseAuthParams = {
-    JITPDRMType: "Widevine",
-    virtualDomain: "001.live_hls.zte.com",
-    m4s_min: "1",
-    NeedJITP: "1",
-    isjitp: "0",
-    startNumber: session.startNumber,
-    filedura: "6",
-    ispcode: "55",
-    IASHttpSessionId: session.IAS,
-    usersessionid: session.userSession
-  };
+  const authParams =
+    `JITPDRMType=Widevine` +
+    `&virtualDomain=001.live_hls.zte.com` +
+    `&m4s_min=1` + // KEEP m4s_min=1
+    `&NeedJITP=1` +
+    `&isjitp=0` +
+    `&startNumber=${session.startNumber}` +
+    `&filedura=6` +
+    `&ispcode=55` +
+    `&IASHttpSessionId=${session.IAS}` +
+    `&usersessionid=${session.userSession}`;
 
   try {
-    const upstream = await fetchSegment(origin => {
+    const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      const url = new URL(path, base.startsWith("http") ? base : `http://${base}`);
-      Object.entries(baseAuthParams).forEach(([k, v]) => url.searchParams.set(k, v));
-      return url.toString();
+      return path.includes("?")
+        ? `${base}${path}&${authParams}`
+        : `${base}${path}?${authParams}`;
     }, req, session);
 
     // =========================
@@ -132,14 +144,14 @@ app.get("/:channelId/*", async (req, res) => {
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
+
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Remove old BaseURL
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-      mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
-
-      // ✅ Update SegmentTimeline start numbers to current session.startNumber
-      mpd = mpd.replace(/startNumber="\d+"/g, `startNumber="${session.startNumber}"`);
+      mpd = mpd.replace(
+        /<MPD([^>]*)>/,
+        `<MPD$1><BaseURL>${proxyBase}</BaseURL>`
+      );
 
       res.set({
         "Content-Type": "application/dash+xml",
@@ -165,27 +177,24 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Segment stall detected → skip to next segment");
-        rotateOrigin(session);
-        session.startNumber += 1;
+        console.warn("⚠️ Segment stall detected, rotating origin...");
+        rotateOrigin(session); // rotate on stall
         upstream.body.destroy();
         res.destroy();
       }
     }, 1000);
 
-    upstream.body.on("data", () => lastChunk = Date.now());
+    upstream.body.on("data", () => {
+      lastChunk = Date.now();
+    });
 
     pipeline(upstream.body, res, err => {
       clearInterval(stallTimer);
       if (err) res.destroy();
     });
 
-    // ✅ Increment startNumber for next segment immediately
-    session.startNumber += 1;
-
   } catch (err) {
-    console.error("❌ Proxy error:", err.message, "→ skip segment");
-    session.startNumber += 1;
+    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
