@@ -41,7 +41,7 @@ const ORIGINS = [
 ];
 
 // =========================
-// PER-CHANNEL SESSION
+// PER-CHANNEL SESSION (STICKY)
 // =========================
 const channelSessions = new Map();
 
@@ -50,10 +50,14 @@ function createSession() {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString(),
-    lastSegment: null,
-    repeatCount: 0
+    userSession: Math.floor(Math.random() * 1e15).toString()
   };
+}
+
+function resetSegments(session) {
+  session.startNumber = 46489952 + Math.floor(Math.random() * 100000) * 6;
+  session.IAS = "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
+  session.userSession = Math.floor(Math.random() * 1e15).toString();
 }
 
 function getSession(channelId) {
@@ -63,27 +67,9 @@ function getSession(channelId) {
   return channelSessions.get(channelId);
 }
 
-// =========================
-// HARD ROTATION (FULL RESET)
-// =========================
-function hardRotate(session, reason = "unknown") {
+function rotateOrigin(session, reset = false) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
-
-  // jump far ahead → fresh live window
-  session.startNumber += 6 * (5 + Math.floor(Math.random() * 5));
-
-  // regenerate session IDs
-  session.IAS = "RR" + Date.now() + Math.random().toString(36).slice(2, 10);
-  session.userSession = Math.floor(Math.random() * 1e15).toString();
-
-  // reset loop detection
-  session.lastSegment = null;
-  session.repeatCount = 0;
-
-  console.log("🔥 HARD ROTATE:", reason, {
-    origin: session.originIndex,
-    startNumber: session.startNumber
-  });
+  if (reset) resetSegments(session);
 }
 
 // cleanup every 10 min
@@ -93,7 +79,7 @@ setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 // FETCH WITH STICKY ORIGIN
 // =========================
 async function fetchSticky(urlBuilder, req, session) {
-  for (let i = 0; i < ORIGINS.length; i++) {
+  for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
     const origin = ORIGINS[session.originIndex];
     const url = urlBuilder(origin);
 
@@ -113,18 +99,15 @@ async function fetchSticky(urlBuilder, req, session) {
 
       clearTimeout(timeout);
 
-      if ([403, 404, 410].includes(res.status)) {
-        throw new Error("Hard fail " + res.status);
-      }
-
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
       return res;
+
     } catch (err) {
-      console.error("⚠️ ORIGIN FAIL:", origin);
-      hardRotate(session, "origin-fail");
+      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
+      rotateOrigin(session, true); // 🔥 rotate + reset ONLY on error
     }
   }
+
   throw new Error("All origins failed");
 }
 
@@ -132,7 +115,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy (Hard Rotate + No Cache)");
+  res.send("✅ DASH Proxy (Sticky Origin, Reset On Error Only)");
 });
 
 // =========================
@@ -142,25 +125,6 @@ app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const session = getSession(channelId);
-
-  // =========================
-  // REPEATED SEGMENT DETECTOR
-  // =========================
-  if (path.endsWith(".m4s")) {
-    const match = path.match(/(\d+)\.m4s/);
-    if (match) {
-      const seg = Number(match[1]);
-      if (session.lastSegment === seg) {
-        session.repeatCount++;
-        if (session.repeatCount >= 2) {
-          hardRotate(session, "segment-loop");
-        }
-      } else {
-        session.lastSegment = seg;
-        session.repeatCount = 0;
-      }
-    }
-  }
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -200,9 +164,7 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+        "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*"
       });
 
@@ -214,9 +176,7 @@ app.get("/:channelId/*", async (req, res) => {
     // =========================
     res.set({
       "Content-Type": "video/mp4",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "Pragma": "no-cache",
-      "Expires": "0",
+      "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     });
@@ -226,7 +186,7 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        hardRotate(session, "segment-stall");
+        rotateOrigin(session, true); // 🔥 rotate + reset on stall
         upstream.body.destroy();
         res.destroy();
       }
@@ -242,8 +202,7 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ PROXY ERROR:", err.message);
-    hardRotate(session, "fatal-error");
+    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
