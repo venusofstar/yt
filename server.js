@@ -63,9 +63,10 @@ async function fetchUpstream(urlBuilder, session) {
         timeout: 3000
       });
       if (!res.ok) throw new Error();
+      rotateOrigin(session); // auto rotate **every successful fetch**
       return res;
     } catch {
-      rotateOrigin(session); // only rotate on error
+      rotateOrigin(session); // also rotate on error
     }
   }
   throw new Error("All origins failed");
@@ -129,15 +130,15 @@ app.get("/:channelId/*", async (req, res) => {
         session.lastSegment = segNum;
         session.streamStarted = true;
       }
-      if (err && session.streamStarted) {
+      if (err) {
         rotateOrigin(session);
         return res.status(204).end();
       }
     });
-
     upstream.body.on("data", c => (bytes += c.length));
 
   } catch {
+    rotateOrigin(session);
     return res.status(204).end();
   }
 });
@@ -146,5 +147,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log("✅ Live DASH proxy fully optimized — no repeat, zero buffering, forward-only");
+  console.log("✅ Live DASH proxy fully optimized — auto-rotate every segment, no repeat, forward-only");
 });
