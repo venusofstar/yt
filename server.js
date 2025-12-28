@@ -36,18 +36,22 @@ const ORIGINS = [
 // =========================
 const channelSessions = new Map();
 
-function createSession() {
+function createSession(channelId) {
+  // Auto-generate ztecid per channelId
+  const ztecid = `ch0000009099000000${channelId}${Math.floor(Math.random() * 9000 + 1000)}`;
+
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString()
+    userSession: Math.floor(Math.random() * 1e15).toString(),
+    ztecid // store auto-generated ztecid
   };
 }
 
 function getSession(channelId) {
   if (!channelSessions.has(channelId)) {
-    channelSessions.set(channelId, createSession());
+    channelSessions.set(channelId, createSession(channelId));
   }
   return channelSessions.get(channelId);
 }
@@ -100,7 +104,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH/HLS Proxy (Stable m4s_min=1, Auto Origin Rotate)");
+  res.send("✅ DASH/HLS Proxy (Stable m4s_min=1, Auto Origin Rotate, Auto ztecid)");
 });
 
 // =========================
@@ -121,7 +125,8 @@ app.get("/:channelId/*", async (req, res) => {
     `&filedura=6` +
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
-    `&usersessionid=${session.userSession}`;
+    `&usersessionid=${session.userSession}` +
+    `&ztecid=${session.ztecid}`; // auto-generated per channel
 
   try {
     const upstream = await fetchSticky(origin => {
