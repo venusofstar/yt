@@ -51,7 +51,12 @@ function createSession() {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString()
+    userSession: Math.floor(Math.random() * 1e15).toString(),
+
+    // ⚡ predictive stats
+    lastSegmentId: null,
+    avgDownloadMs: 1200,
+    lastDownloadMs: 0
   };
 }
 
@@ -79,13 +84,12 @@ function isSegmentFailed(channelId, segmentId) {
 }
 
 // =========================
-// 🔄 GLOBAL ROTATION (EVERY 15s)
+// 🔄 GLOBAL ROTATION (15s)
 // =========================
 setInterval(() => {
   for (const session of channelSessions.values()) {
     rotateOrigin(session);
   }
-  console.log("🔄 Global origin rotation (15s)");
 }, 15000);
 
 // Cleanup
@@ -128,14 +132,7 @@ async function fetchSticky(urlBuilder, req, session) {
 }
 
 // =========================
-// HOME
-// =========================
-app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy – Global 15s Rotation Enabled");
-});
-
-// =========================
-// DASH PROXY
+// ROUTE
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -143,8 +140,9 @@ app.get("/:channelId/*", async (req, res) => {
   const session = getSession(channelId);
 
   const segmentMatch = path.match(/(\d+)\.(m4s|mp4)/);
-  const segmentId = segmentMatch ? segmentMatch[1] : null;
+  const segmentId = segmentMatch ? Number(segmentMatch[1]) : null;
 
+  // ⏭️ Skip known bad segment
   if (segmentId && isSegmentFailed(channelId, segmentId)) {
     session.startNumber += 6;
     rotateOrigin(session);
@@ -171,7 +169,9 @@ app.get("/:channelId/*", async (req, res) => {
         : `${base}${path}?${authParams}`;
     }, req, session);
 
+    // =========================
     // MPD
+    // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
@@ -190,19 +190,23 @@ app.get("/:channelId/*", async (req, res) => {
       return res.send(mpd);
     }
 
-    // SEGMENTS
+    // =========================
+    // SEGMENT WITH ⚡ PREDICTIVE JUMP
+    // =========================
     res.set({
       "Content-Type": "video/mp4",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*"
     });
 
-    let lastChunk = Date.now();
+    const startTime = Date.now();
+    let lastChunk = startTime;
     let bytes = 0;
-    const STALL_LIMIT = 4000;
 
-    const stallTimer = setInterval(() => {
-      if (Date.now() - lastChunk > STALL_LIMIT) {
+    const PREDICT_LIMIT = session.avgDownloadMs * 1.8;
+
+    const predictiveTimer = setInterval(() => {
+      if (Date.now() - startTime > PREDICT_LIMIT) {
         if (segmentId) {
           markSegmentFailed(channelId, segmentId);
           session.startNumber += 6;
@@ -211,7 +215,7 @@ app.get("/:channelId/*", async (req, res) => {
         upstream.body.destroy();
         res.destroy();
       }
-    }, 1000);
+    }, 500);
 
     upstream.body.on("data", chunk => {
       bytes += chunk.length;
@@ -219,7 +223,13 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
     pipeline(upstream.body, res, err => {
-      clearInterval(stallTimer);
+      clearInterval(predictiveTimer);
+
+      const duration = Date.now() - startTime;
+      session.lastDownloadMs = duration;
+      session.avgDownloadMs =
+        session.avgDownloadMs * 0.7 + duration * 0.3;
+
       if (err || bytes === 0) {
         if (segmentId) {
           markSegmentFailed(channelId, segmentId);
@@ -227,6 +237,8 @@ app.get("/:channelId/*", async (req, res) => {
         }
         rotateOrigin(session);
         res.destroy();
+      } else {
+        session.lastSegmentId = segmentId;
       }
     });
 
@@ -239,5 +251,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ DASH proxy running on port ${PORT}`);
+  console.log("✅ DASH proxy with predictive segment jump running");
 });
