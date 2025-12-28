@@ -38,7 +38,9 @@ const channelSessions = new Map();
 const failedSegments = new Map();
 const originHealth = new Map();
 
-ORIGINS.forEach(o => originHealth.set(o, { score: 100, fail: 0, latency: 1200 }));
+ORIGINS.forEach(o =>
+  originHealth.set(o, { score: 100, latency: 1200, fails: 0 })
+);
 
 // =========================
 // SESSION
@@ -60,20 +62,18 @@ function getSession(id) {
 }
 
 // =========================
-// ORIGIN SELECTION
+// ORIGIN HEALTH CONTROL
 // =========================
 function bestOrigin(session) {
-  const ranked = ORIGINS
-    .map(o => ({ o, s: originHealth.get(o).score }))
-    .sort((a, b) => b.s - a.s);
-
-  session.originIndex = ORIGINS.indexOf(ranked[0].o);
+  const best = [...originHealth.entries()]
+    .sort((a, b) => b[1].score - a[1].score)[0][0];
+  session.originIndex = ORIGINS.indexOf(best);
 }
 
 function penalize(origin) {
   const h = originHealth.get(origin);
-  h.score = Math.max(0, h.score - 20);
-  h.fail++;
+  h.score = Math.max(0, h.score - 25);
+  h.fails++;
 }
 
 function reward(origin, ms) {
@@ -83,23 +83,11 @@ function reward(origin, ms) {
 }
 
 // =========================
-// GLOBAL ROTATION (15s)
-// =========================
-setInterval(() => {
-  for (const s of channelSessions.values()) bestOrigin(s);
-}, 15000);
-
-// Cleanup
-setInterval(() => {
-  channelSessions.clear();
-  failedSegments.clear();
-}, 10 * 60 * 1000);
-
-// =========================
-// FETCH
+// FETCH (ROTATE ONLY ON ERROR)
 // =========================
 async function fetchSticky(build, req, session) {
   for (let i = 0; i < ORIGINS.length; i++) {
+    bestOrigin(session);
     const origin = ORIGINS[session.originIndex];
     const url = build(origin);
     const start = Date.now();
@@ -109,7 +97,7 @@ async function fetchSticky(build, req, session) {
       const t = setTimeout(() => controller.abort(), 12000);
 
       const res = await fetch(url, {
-        agent: url.startsWith("https") ? httpsAgent : httpAgent,
+        agent: origin.startsWith("https") ? httpsAgent : httpAgent,
         headers: { "User-Agent": "OTT", "Connection": "keep-alive" },
         signal: controller.signal
       });
@@ -122,10 +110,9 @@ async function fetchSticky(build, req, session) {
 
     } catch {
       penalize(origin);
-      session.originIndex = (session.originIndex + 1) % ORIGINS.length;
     }
   }
-  throw new Error("All origins dead");
+  throw new Error("All origins failed");
 }
 
 // =========================
@@ -152,11 +139,13 @@ app.get("/:channelId/*", async (req, res) => {
   try {
     const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      return path.includes("?") ? `${base}${path}&${auth}` : `${base}${path}?${auth}`;
+      return path.includes("?")
+        ? `${base}${path}&${auth}`
+        : `${base}${path}?${auth}`;
     }, req, session);
 
     // =========================
-    // MPD (LIVE EDGE TRIM)
+    // MPD (LIVE EDGE ONLY)
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
@@ -172,7 +161,7 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // SEGMENT (PREDICTIVE + ADAPTIVE JUMP)
+    // SEGMENT (ULTRA BOSS)
     // =========================
     let bytes = 0;
     const start = Date.now();
@@ -181,7 +170,8 @@ app.get("/:channelId/*", async (req, res) => {
     const killer = setInterval(() => {
       if (Date.now() - start > predictLimit) {
         if (segId) {
-          if (!failedSegments.has(channelId)) failedSegments.set(channelId, new Set());
+          if (!failedSegments.has(channelId))
+            failedSegments.set(channelId, new Set());
           failedSegments.get(channelId).add(segId);
           session.jump = Math.min(18, session.jump + 6);
           session.startNumber += session.jump;
@@ -214,5 +204,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START
 // =========================
 app.listen(PORT, () => {
-  console.log("🔥 FINAL BOSS DASH PROXY RUNNING");
+  console.log("💀🔥 ULTRA BOSS DASH PROXY (ERROR-ONLY ROTATION) RUNNING");
 });
