@@ -44,7 +44,7 @@ const ORIGINS = [
 // SESSION STATE
 // =========================
 const channelSessions = new Map();
-const failedSegments = new Map(); // channelId -> Set(segmentId)
+const failedSegments = new Map();
 
 function createSession() {
   return {
@@ -78,6 +78,16 @@ function isSegmentFailed(channelId, segmentId) {
          failedSegments.get(channelId).has(segmentId);
 }
 
+// =========================
+// 🔄 GLOBAL ROTATION (EVERY 15s)
+// =========================
+setInterval(() => {
+  for (const session of channelSessions.values()) {
+    rotateOrigin(session);
+  }
+  console.log("🔄 Global origin rotation (15s)");
+}, 15000);
+
 // Cleanup
 setInterval(() => {
   channelSessions.clear();
@@ -107,11 +117,10 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
-
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
 
-    } catch (e) {
+    } catch {
       rotateOrigin(session);
     }
   }
@@ -122,7 +131,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy – Auto Skip End Segments");
+  res.send("✅ DASH Proxy – Global 15s Rotation Enabled");
 });
 
 // =========================
@@ -162,9 +171,7 @@ app.get("/:channelId/*", async (req, res) => {
         : `${base}${path}?${authParams}`;
     }, req, session);
 
-    // =========================
     // MPD
-    // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
@@ -180,18 +187,14 @@ app.get("/:channelId/*", async (req, res) => {
         "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*"
       });
-
       return res.send(mpd);
     }
 
-    // =========================
     // SEGMENTS
-    // =========================
     res.set({
       "Content-Type": "video/mp4",
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Connection": "keep-alive"
+      "Access-Control-Allow-Origin": "*"
     });
 
     let lastChunk = Date.now();
@@ -217,7 +220,6 @@ app.get("/:channelId/*", async (req, res) => {
 
     pipeline(upstream.body, res, err => {
       clearInterval(stallTimer);
-
       if (err || bytes === 0) {
         if (segmentId) {
           markSegmentFailed(channelId, segmentId);
@@ -228,7 +230,7 @@ app.get("/:channelId/*", async (req, res) => {
       }
     });
 
-  } catch (e) {
+  } catch {
     res.status(502).end();
   }
 });
