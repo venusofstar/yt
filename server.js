@@ -9,13 +9,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.raw({ type: "*/*" }));
 
 // =========================
-// KEEP-ALIVE AGENTS
+// KEEP ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 300 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 300 });
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 500 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 500 });
 
 // =========================
 // ORIGINS
@@ -32,14 +31,14 @@ const ORIGINS = [
 ];
 
 // =========================
-// GLOBAL STATE
+// STATE
 // =========================
 const channelSessions = new Map();
 const failedSegments = new Map();
 const originHealth = new Map();
 
 ORIGINS.forEach(o =>
-  originHealth.set(o, { score: 100, latency: 1200, fails: 0 })
+  originHealth.set(o, { score: 100 })
 );
 
 // =========================
@@ -49,20 +48,21 @@ function createSession() {
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
-    IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString(),
-    avgMs: 1200,
+    IAS: "RR" + Date.now(),
+    userSession: Math.random().toString(36).slice(2),
+    avgMs: 1000,
     jump: 6
   };
 }
 
 function getSession(id) {
-  if (!channelSessions.has(id)) channelSessions.set(id, createSession());
+  if (!channelSessions.has(id))
+    channelSessions.set(id, createSession());
   return channelSessions.get(id);
 }
 
 // =========================
-// ORIGIN HEALTH CONTROL
+// ORIGIN CONTROL (ERROR ONLY)
 // =========================
 function bestOrigin(session) {
   const best = [...originHealth.entries()]
@@ -71,48 +71,36 @@ function bestOrigin(session) {
 }
 
 function penalize(origin) {
-  const h = originHealth.get(origin);
-  h.score = Math.max(0, h.score - 25);
-  h.fails++;
-}
-
-function reward(origin, ms) {
-  const h = originHealth.get(origin);
-  h.latency = h.latency * 0.7 + ms * 0.3;
-  h.score = Math.min(100, h.score + 2);
+  originHealth.get(origin).score -= 25;
 }
 
 // =========================
-// FETCH (ROTATE ONLY ON ERROR)
+// FETCH (NO WAITING)
 // =========================
-async function fetchSticky(build, req, session) {
+async function fetchFast(build, session) {
   for (let i = 0; i < ORIGINS.length; i++) {
     bestOrigin(session);
     const origin = ORIGINS[session.originIndex];
     const url = build(origin);
-    const start = Date.now();
 
     try {
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 12000);
+      setTimeout(() => controller.abort(), 3000); // 🔥 HARD CUT
 
       const res = await fetch(url, {
         agent: origin.startsWith("https") ? httpsAgent : httpAgent,
-        headers: { "User-Agent": "OTT", "Connection": "keep-alive" },
+        headers: { "User-Agent": "OTT" },
         signal: controller.signal
       });
 
-      clearTimeout(t);
-      if (!res.ok) throw new Error(res.status);
-
-      reward(origin, Date.now() - start);
+      if (!res.ok) throw 0;
       return res;
 
     } catch {
       penalize(origin);
     }
   }
-  throw new Error("All origins failed");
+  throw 0;
 }
 
 // =========================
@@ -124,8 +112,9 @@ app.get("/:channelId/*", async (req, res) => {
   const session = getSession(channelId);
 
   const segMatch = path.match(/(\d+)\.(m4s|mp4)/);
-  const segId = segMatch ? segMatch[1] : null;
+  const segId = segMatch?.[1];
 
+  // 🔥 NEVER REPEAT A FAILED SEGMENT
   if (segId && failedSegments.get(channelId)?.has(segId)) {
     session.startNumber += session.jump;
     return res.status(204).end();
@@ -137,15 +126,15 @@ app.get("/:channelId/*", async (req, res) => {
     `&IASHttpSessionId=${session.IAS}&usersessionid=${session.userSession}`;
 
   try {
-    const upstream = await fetchSticky(origin => {
+    const upstream = await fetchFast(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
       return path.includes("?")
         ? `${base}${path}&${auth}`
         : `${base}${path}?${auth}`;
-    }, req, session);
+    }, session);
 
     // =========================
-    // MPD (LIVE EDGE ONLY)
+    // MPD (LIVE ONLY)
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
@@ -154,21 +143,19 @@ app.get("/:channelId/*", async (req, res) => {
         /<MPD([^>]*)>/,
         `<MPD$1><BaseURL>${req.protocol}://${req.get("host")}/${channelId}/</BaseURL>`
       );
-      mpd = mpd.replace(/timeShiftBufferDepth="PT\d+S"/, 'timeShiftBufferDepth="PT30S"');
-
-      res.set("Content-Type", "application/dash+xml");
-      return res.send(mpd);
+      mpd = mpd.replace(/timeShiftBufferDepth="PT\d+S"/, 'timeShiftBufferDepth="PT25S"');
+      return res.type("application/dash+xml").send(mpd);
     }
 
     // =========================
-    // SEGMENT (ULTRA BOSS)
+    // SEGMENT – ZERO BUFFERING
     // =========================
     let bytes = 0;
     const start = Date.now();
-    const predictLimit = session.avgMs * 1.6;
+    const MAX_TIME = session.avgMs * 1.3;
 
-    const killer = setInterval(() => {
-      if (Date.now() - start > predictLimit) {
+    const kill = setInterval(() => {
+      if (Date.now() - start > MAX_TIME) {
         if (segId) {
           if (!failedSegments.has(channelId))
             failedSegments.set(channelId, new Set());
@@ -176,27 +163,30 @@ app.get("/:channelId/*", async (req, res) => {
           session.jump = Math.min(18, session.jump + 6);
           session.startNumber += session.jump;
         }
+        clearInterval(kill);
         upstream.body.destroy();
-        res.destroy();
+        return res.status(204).end(); // 🔥 IMMEDIATE SKIP
       }
-    }, 500);
+    }, 200);
 
     pipeline(upstream.body, res, err => {
-      clearInterval(killer);
-      const dur = Date.now() - start;
-      session.avgMs = session.avgMs * 0.7 + dur * 0.3;
-
+      clearInterval(kill);
       if (err || bytes === 0) {
-        session.jump = Math.min(18, session.jump + 6);
-      } else {
-        session.jump = 6;
+        if (segId) {
+          failedSegments.get(channelId)?.add(segId);
+          session.startNumber += session.jump;
+        }
+        return res.status(204).end();
       }
+      session.avgMs = session.avgMs * 0.7 + (Date.now() - start) * 0.3;
+      session.jump = 6;
     });
 
     upstream.body.on("data", c => (bytes += c.length));
 
   } catch {
-    res.status(502).end();
+    session.startNumber += session.jump;
+    return res.status(204).end();
   }
 });
 
@@ -204,5 +194,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START
 // =========================
 app.listen(PORT, () => {
-  console.log("💀🔥 ULTRA BOSS DASH PROXY (ERROR-ONLY ROTATION) RUNNING");
+  console.log("💀🔥 ULTRA BOSS — ZERO BUFFERING MODE ACTIVE");
 });
