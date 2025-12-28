@@ -98,7 +98,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH/HLS Proxy (Stable m4s_min=1, Auto Origin Rotate, Auto ztecid)");
+  res.send("Enjoy your life");
 });
 
 // =========================
