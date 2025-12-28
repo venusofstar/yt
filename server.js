@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 // =========================
-// KEEP ALIVE
+// TCP / KEEP-ALIVE
 // =========================
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 500 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 500 });
@@ -46,27 +46,29 @@ function getSession(channelId) {
   return sessions.get(channelId);
 }
 
-function rotate(session) {
+function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
 // =========================
-// FETCH
+// FETCH UPSTREAM
 // =========================
-async function fetchUpstream(build, req, session) {
-  const origin = ORIGINS[session.originIndex];
-  try {
-    const res = await fetch(build(origin), {
-      agent: origin.startsWith("https") ? httpsAgent : httpAgent,
-      headers: { "User-Agent": req.headers["user-agent"] || "OTT" },
-      timeout: 6000
-    });
-    if (!res.ok) throw new Error();
-    return res;
-  } catch {
-    rotate(session);
-    throw new Error("rotate");
+async function fetchUpstream(urlBuilder, session) {
+  for (let i = 0; i < ORIGINS.length; i++) {
+    const origin = ORIGINS[session.originIndex];
+    try {
+      const res = await fetch(urlBuilder(origin), {
+        agent: origin.startsWith("https") ? httpsAgent : httpAgent,
+        headers: { "User-Agent": "OTT" },
+        timeout: 3000
+      });
+      if (!res.ok) throw new Error();
+      return res;
+    } catch {
+      rotateOrigin(session); // only rotate on error
+    }
   }
+  throw new Error("All origins failed");
 }
 
 // =========================
@@ -77,17 +79,13 @@ app.get("/:channelId/*", async (req, res) => {
   const path = req.params[0];
   const session = getSession(channelId);
 
-  // =========================
-  // SEGMENT NUMBER PARSE
-  // =========================
   const segMatch = path.match(/(\d+)\.(m4s|mp4)/);
   const segNum = segMatch ? parseInt(segMatch[1]) : null;
 
   // =========================
-  // BLOCK REPEAT (CRITICAL)
+  // BLOCK REPEATS
   // =========================
   if (segNum !== null && segNum <= session.lastSegment) {
-    // 🔥 FORCE FORWARD
     return res.status(204).end();
   }
 
@@ -97,27 +95,21 @@ app.get("/:channelId/*", async (req, res) => {
   try {
     const upstream = await fetchUpstream(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      return path.includes("?")
-        ? `${base}${path}&${auth}`
-        : `${base}${path}?${auth}`;
-    }, req, session);
+      return path.includes("?") ? `${base}${path}&${auth}` : `${base}${path}?${auth}`;
+    }, session);
 
     // =========================
     // MPD
     // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
-
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
       mpd = mpd.replace(
         /<MPD([^>]*)>/,
         `<MPD$1><BaseURL>${req.protocol}://${req.get("host")}/${channelId}/</BaseURL>`
       );
-
-      // Tight live window (NO REWIND)
-      mpd = mpd.replace(/timeShiftBufferDepth="PT\d+S"/, 'timeShiftBufferDepth="PT10S"');
+      mpd = mpd.replace(/timeShiftBufferDepth="PT\d+S"/, 'timeShiftBufferDepth="PT15S"');
       mpd = mpd.replace(/minBufferTime="PT\d+(\.\d+)?S"/, 'minBufferTime="PT0.8S"');
-
       return res.type("application/dash+xml").send(mpd);
     }
 
@@ -129,18 +121,16 @@ app.get("/:channelId/*", async (req, res) => {
     }
 
     // =========================
-    // MEDIA SEGMENT (FRESH ONLY)
+    // MEDIA SEGMENT
     // =========================
     let bytes = 0;
-
     pipeline(upstream.body, res, err => {
       if (!err && bytes > 0 && segNum !== null) {
-        session.lastSegment = segNum; // 🔥 LOCK IT
+        session.lastSegment = segNum;
         session.streamStarted = true;
       }
-
       if (err && session.streamStarted) {
-        rotate(session);
+        rotateOrigin(session);
         return res.status(204).end();
       }
     });
@@ -153,8 +143,8 @@ app.get("/:channelId/*", async (req, res) => {
 });
 
 // =========================
-// START
+// START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log("✅ DASH proxy — FRESH SEGMENTS ONLY, NO REPEAT");
+  console.log("✅ Live DASH proxy fully optimized — no repeat, zero buffering, forward-only");
 });
