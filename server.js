@@ -35,25 +35,22 @@ const ORIGINS = [
 ];
 
 // =========================
-// PER-CHANNEL SESSION (STABLE)
+// PER-CHANNEL SESSION
 // =========================
 const channelSessions = new Map();
 
-function createSession(channelId) {
+function createSession() {
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString(),
-
-    // 🔒 Deterministic ZTE Channel ID
-    ztecid: `ch0000009099000000${channelId}`
+    userSession: Math.floor(Math.random() * 1e15).toString()
   };
 }
 
 function getSession(channelId) {
   if (!channelSessions.has(channelId)) {
-    channelSessions.set(channelId, createSession(channelId));
+    channelSessions.set(channelId, createSession());
   }
   return channelSessions.get(channelId);
 }
@@ -62,14 +59,14 @@ function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// cleanup every 10 minutes
+// cleanup every 10 min
 setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
 
 // =========================
-// FETCH WITH AUTO ROTATION
+// FETCH WITH STICKY ORIGIN
 // =========================
 async function fetchSticky(urlBuilder, req, session) {
-  for (let i = 0; i < ORIGINS.length; i++) {
+  for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
     const origin = ORIGINS[session.originIndex];
     const url = urlBuilder(origin);
 
@@ -88,15 +85,17 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
 
-    } catch (e) {
-      console.warn("⚠️ Origin failed:", origin);
+    } catch (err) {
+      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
       rotateOrigin(session);
       await new Promise(r => setTimeout(r, 200));
     }
   }
+
   throw new Error("All origins failed");
 }
 
@@ -104,7 +103,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("Enjoy your Life");
+  res.send("✅ DASH Proxy Running");
 });
 
 // =========================
@@ -114,6 +113,9 @@ app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const session = getSession(channelId);
+
+  // ✅ ONLY CHANGE IS HERE
+  const ztecid = `ch0000009099000000${channelId}`;
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -126,7 +128,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
-    `&ztecid=${session.ztecid}`;
+    `&ztecid=${ztecid}`; // ✅ auto from channelId
 
   try {
     const upstream = await fetchSticky(origin => {
@@ -154,11 +156,12 @@ app.get("/:channelId/*", async (req, res) => {
         "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*"
       });
+
       return res.send(mpd);
     }
 
     // =========================
-    // SEGMENTS (SAFE PIPE)
+    // SEGMENTS
     // =========================
     res.set({
       "Content-Type": "video/mp4",
@@ -170,34 +173,12 @@ app.get("/:channelId/*", async (req, res) => {
     const stream = new PassThrough();
     stream.pipe(res);
 
-    let lastChunk = Date.now();
-    const STALL_LIMIT = 3000;
+    upstream.body.on("data", chunk => stream.write(chunk));
+    upstream.body.on("end", () => stream.end());
+    upstream.body.on("error", () => stream.end());
 
-    const stallTimer = setInterval(() => {
-      if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Stall detected → rotate origin");
-        rotateOrigin(session);
-        upstream.body.destroy();
-      }
-    }, 500);
-
-    upstream.body.on("data", chunk => {
-      lastChunk = Date.now();
-      stream.write(chunk);
-    });
-
-    upstream.body.on("end", () => {
-      clearInterval(stallTimer);
-      stream.end();
-    });
-
-    upstream.body.on("error", () => {
-      rotateOrigin(session);
-      stream.end();
-    });
-
-  } catch (e) {
-    console.error("❌ Proxy error:", e.message);
+  } catch (err) {
+    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
