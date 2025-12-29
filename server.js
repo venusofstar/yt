@@ -3,7 +3,6 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const http = require("http");
 const https = require("https");
-const { PassThrough } = require("stream");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,15 +13,24 @@ app.use(express.raw({ type: "*/*" }));
 // =========================
 // KEEP-ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
 
 // =========================
 // ORIGINS
 // =========================
 const ORIGINS = [
   "http://143.44.136.67:6060",
-  "http://136.239.158.18:6610"
+  "http://136.239.158.18:6410"
 ];
 
 // =========================
@@ -31,15 +39,15 @@ const ORIGINS = [
 const channelSessions = new Map();
 
 function createSession(channelId) {
-  // Auto-generate ztecid per channelId
-  const ztecid = `ch0000009099000000${channelId}${Math.floor(Math.random() * 9000 + 1000)}`;
-
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
     userSession: Math.floor(Math.random() * 1e15).toString(),
-    ztecid // store auto-generated ztecid
+    // ✅ ztecid SAME AS channel path id
+    ztecid: `ch0000009099000000${channelId}`,
+    authInfo: null,
+    authInfoTime: 0
   };
 }
 
@@ -54,8 +62,26 @@ function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// cleanup every 10 min
+// cleanup every 10 minutes
 setInterval(() => channelSessions.clear(), 10 * 60 * 1000);
+
+// =========================
+// AUTHINFO ROTATION
+// =========================
+const AUTHINFO_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function fetchNewAuthInfo(channelId) {
+  // 🔴 replace with real auth source
+  return "rSpjhsi8YPKuwtVD96LPO9APsXSpK2mq6dZZRgF8v7xYxw0MdBePEXRMFugy%2F7SuAXlR2%2FEFrpiArV%2FBblLcXA%3D%3D";
+}
+
+async function getAuthInfo(session, channelId) {
+  if (!session.authInfo || Date.now() - session.authInfoTime > AUTHINFO_TTL) {
+    session.authInfo = await fetchNewAuthInfo(channelId);
+    session.authInfoTime = Date.now();
+  }
+  return session.authInfo;
+}
 
 // =========================
 // FETCH WITH STICKY ORIGIN
@@ -81,13 +107,17 @@ async function fetchSticky(urlBuilder, req, session) {
 
       clearTimeout(timeout);
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res;
+      if (res.status === 401 || res.status === 403) {
+        session.authInfo = null;
+        throw new Error("AuthInfo expired");
+      }
 
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      return res;
     } catch (err) {
-      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex], err.message);
       rotateOrigin(session);
-      await new Promise(r => setTimeout(r, 200)); // small delay before retry
+      await new Promise(r => setTimeout(r, 200));
     }
   }
 
@@ -102,27 +132,30 @@ app.get("/", (_, res) => {
 });
 
 // =========================
-// DASH/HLS PROXY
+// DASH / HLS PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const session = getSession(channelId);
 
-  const authParams =
-    `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +
-    `&NeedJITP=1` +
-    `&isjitp=0` +
-    `&startNumber=${session.startNumber}` +
-    `&filedura=6` +
-    `&ispcode=55` +
-    `&IASHttpSessionId=${session.IAS}` +
-    `&usersessionid=${session.userSession}` +
-    `&ztecid=${session.ztecid}`; // auto-generated per channel
-
   try {
+    const authInfo = await getAuthInfo(session, channelId);
+
+    const authParams =
+      `AuthInfo=${authInfo}` +
+      `&JITPDRMType=Widevine` +
+      `&virtualDomain=001.live_hls.zte.com` +
+      `&m4s_min=1` +
+      `&NeedJITP=1` +
+      `&isjitp=0` +
+      `&startNumber=${session.startNumber}` +
+      `&filedura=6` +
+      `&ispcode=55` +
+      `&IASHttpSessionId=${session.IAS}` +
+      `&usersessionid=${session.userSession}` +
+      `&ztecid=${session.ztecid}`;
+
     const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
       return path.includes("?")
@@ -130,9 +163,6 @@ app.get("/:channelId/*", async (req, res) => {
         : `${base}${path}?${authParams}`;
     }, req, session);
 
-    // =========================
-    // MPD
-    // =========================
     if (path.endsWith(".mpd")) {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
@@ -152,49 +182,15 @@ app.get("/:channelId/*", async (req, res) => {
       return res.send(mpd);
     }
 
-    // =========================
-    // SEGMENTS
-    // =========================
     res.set({
       "Content-Type": "video/mp4",
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Connection": "keep-alive"
+      "Access-Control-Allow-Origin": "*"
     });
 
-    const proxyStream = new PassThrough();
-    proxyStream.pipe(res);
-
-    let lastChunk = Date.now();
-    const STALL_LIMIT = 3000;
-
-    // Stall detection
-    const stallTimer = setInterval(() => {
-      if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Segment stall detected, rotating origin...");
-        rotateOrigin(session);
-        upstream.body.destroy();
-      }
-    }, 500);
-
-    upstream.body.on("data", chunk => {
-      lastChunk = Date.now();
-      proxyStream.write(chunk);
-    });
-
-    upstream.body.on("end", () => {
-      clearInterval(stallTimer);
-      proxyStream.end();
-    });
-
-    upstream.body.on("error", err => {
-      console.warn("⚠️ Stream error, rotating origin...", err.message);
-      rotateOrigin(session);
-      proxyStream.end();
-    });
+    upstream.body.pipe(res);
 
   } catch (err) {
-    console.error("❌ Proxy error:", err.message);
     res.status(502).end();
   }
 });
