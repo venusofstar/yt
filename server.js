@@ -14,17 +14,8 @@ app.use(express.raw({ type: "*/*" }));
 // =========================
 // KEEP-ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 200,
-  keepAliveMsecs: 30000
-});
-
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 200,
-  keepAliveMsecs: 30000
-});
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
 
 // =========================
 // ORIGINS
@@ -39,18 +30,22 @@ const ORIGINS = [
 // =========================
 const channelSessions = new Map();
 
-function createSession() {
+function createSession(channelId) {
+  // Auto-generate ztecid per channelId
+  const ztecid = `ch0000009099000000${channelId}${Math.floor(Math.random() * 9000 + 1000)}`;
+
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
-    userSession: Math.floor(Math.random() * 1e15).toString()
+    userSession: Math.floor(Math.random() * 1e15).toString(),
+    ztecid // store auto-generated ztecid
   };
 }
 
 function getSession(channelId) {
   if (!channelSessions.has(channelId)) {
-    channelSessions.set(channelId, createSession());
+    channelSessions.set(channelId, createSession(channelId));
   }
   return channelSessions.get(channelId);
 }
@@ -90,9 +85,9 @@ async function fetchSticky(urlBuilder, req, session) {
       return res;
 
     } catch (err) {
-      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex]);
+      console.error("⚠️ Origin failed:", ORIGINS[session.originIndex], err.message);
       rotateOrigin(session);
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 200)); // small delay before retry
     }
   }
 
@@ -103,19 +98,16 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy Running");
+  res.send("Enjoy your life");
 });
 
 // =========================
-// DASH PROXY
+// DASH/HLS PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
   const session = getSession(channelId);
-
-  // ✅ ONLY CHANGE IS HERE
-  const ztecid = `ch0000009099000000${channelId}`;
 
   const authParams =
     `JITPDRMType=Widevine` +
@@ -128,7 +120,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
-    `&ztecid=${ztecid}`; // ✅ auto from channelId
+    `&ztecid=${session.ztecid}`; // auto-generated per channel
 
   try {
     const upstream = await fetchSticky(origin => {
@@ -170,12 +162,36 @@ app.get("/:channelId/*", async (req, res) => {
       "Connection": "keep-alive"
     });
 
-    const stream = new PassThrough();
-    stream.pipe(res);
+    const proxyStream = new PassThrough();
+    proxyStream.pipe(res);
 
-    upstream.body.on("data", chunk => stream.write(chunk));
-    upstream.body.on("end", () => stream.end());
-    upstream.body.on("error", () => stream.end());
+    let lastChunk = Date.now();
+    const STALL_LIMIT = 3000;
+
+    // Stall detection
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastChunk > STALL_LIMIT) {
+        console.warn("⚠️ Segment stall detected, rotating origin...");
+        rotateOrigin(session);
+        upstream.body.destroy();
+      }
+    }, 500);
+
+    upstream.body.on("data", chunk => {
+      lastChunk = Date.now();
+      proxyStream.write(chunk);
+    });
+
+    upstream.body.on("end", () => {
+      clearInterval(stallTimer);
+      proxyStream.end();
+    });
+
+    upstream.body.on("error", err => {
+      console.warn("⚠️ Stream error, rotating origin...", err.message);
+      rotateOrigin(session);
+      proxyStream.end();
+    });
 
   } catch (err) {
     console.error("❌ Proxy error:", err.message);
@@ -187,5 +203,5 @@ app.get("/:channelId/*", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-  console.log(`✅ DASH proxy running on port ${PORT}`);
+  console.log(`✅ DASH/HLS proxy running on port ${PORT}`);
 });
