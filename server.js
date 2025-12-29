@@ -110,7 +110,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // HOME
 // =========================
 app.get("/", (_, res) => {
-  res.send("✅ DASH Proxy – Stable Playback + Deterministic ztecid");
+  res.send("Enjoy your Life");
 });
 
 // =========================
