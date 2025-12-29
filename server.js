@@ -13,8 +13,8 @@ app.use(express.raw({ type: "*/*" }));
 // =========================
 // KEEP-ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200 });
+const httpAgent = new http.Agent({ keepAlive: true });
+const httpsAgent = new https.Agent({ keepAlive: true });
 
 // =========================
 // ORIGINS
@@ -25,36 +25,33 @@ const ORIGINS = [
 ];
 
 // =========================
-// PER-CHANNEL SESSION
+// AUTHINFO POOL (ROTATE ANY ONE)
 // =========================
-const channelSessions = new Map();
+const AUTHINFO_POOL = [
+  "AuthInfo_VALUE_1",
+  "AuthInfo_VALUE_2",
+  "AuthInfo_VALUE_3"
+];
 
+function getRandomAuthInfo() {
+  return AUTHINFO_POOL[Math.floor(Math.random() * AUTHINFO_POOL.length)];
+}
+
+// =========================
+// SESSION (ROTATE EVERYTHING)
+// =========================
 function createSession(channelId) {
   return {
-    originIndex: Math.floor(Math.random() * ORIGINS.length),
+    origin: ORIGINS[Math.floor(Math.random() * ORIGINS.length)],
     startNumber: 46489952 + Math.floor(Math.random() * 100000) * 6,
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
     userSession: Math.floor(Math.random() * 1e15).toString(),
-    ztecid: `ch0000009099000000${channelId}`, // 🔒 fixed
-    authInfo: null
+    ztecid: `ch0000009099000000${channelId}`
   };
 }
 
-function getSession(channelId) {
-  const session = createSession(channelId);
-  channelSessions.set(channelId, session);
-  return session;
-}
-
 // =========================
-// AUTHINFO (FORCED ROTATION)
-// =========================
-async function fetchNewAuthInfo(channelId) {
-  return "rSpjhsi8YPKuwtVD96LPO9APsXSpK2mq6dZZRgF8v7xYxw0MdBePEXRMFugy%2F7SuAXlR2%2FEFrpiArV%2FBblLcXA%3D%3D";
-}
-
-// =========================
-// SINGLE-SHOT FETCH (NO RETRY)
+// SINGLE FETCH (NO RETRY)
 // =========================
 async function fetchOnce(url, req) {
   const controller = new AbortController();
@@ -64,51 +61,41 @@ async function fetchOnce(url, req) {
     agent: url.startsWith("https") ? httpsAgent : httpAgent,
     headers: {
       "User-Agent": req.headers["user-agent"] || "OTT",
-      "Accept": "*/*",
-      "Connection": "keep-alive"
+      "Accept": "*/*"
     },
     signal: controller.signal
   });
 
   clearTimeout(timeout);
-
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error("UPSTREAM_FAIL");
   return res;
 }
 
 // =========================
-// HOME
+// ROUTES
 // =========================
 app.get("/", (_, res) => res.send("Enjoy your life"));
 
-// =========================
-// DASH / HLS PROXY
-// =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
 
-  // 🔥 FORCE NEW ROTATION EVERY REQUEST
-  const session = getSession(channelId);
-  session.authInfo = await fetchNewAuthInfo(channelId);
+  // 🔥 NEW ROTATION EVERY REQUEST
+  const session = createSession(channelId);
+  const authInfo = getRandomAuthInfo();
 
   const authParams =
-    `AuthInfo=${session.authInfo}` +
+    `AuthInfo=${authInfo}` +
     `&JITPDRMType=Widevine` +
     `&virtualDomain=001.live_hls.zte.com` +
-    `&m4s_min=1` +
     `&NeedJITP=1` +
-    `&isjitp=0` +
     `&startNumber=${session.startNumber}` +
     `&filedura=6` +
-    `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
     `&ztecid=${session.ztecid}`;
 
-  const origin = ORIGINS[session.originIndex];
-  const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-
+  const base = `${session.origin}/001/2/ch0000009099000000${channelId}/`;
   const url = path.includes("?")
     ? `${base}${path}&${authParams}`
     : `${base}${path}?${authParams}`;
@@ -128,8 +115,7 @@ app.get("/:channelId/*", async (req, res) => {
 
       res.set({
         "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-store",
-        "Access-Control-Allow-Origin": "*"
+        "Cache-Control": "no-store"
       });
 
       return res.send(mpd);
@@ -137,22 +123,20 @@ app.get("/:channelId/*", async (req, res) => {
 
     res.set({
       "Content-Type": "video/mp4",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Cache-Control": "no-store"
     });
 
     upstream.body.pipe(res);
 
-  } catch (err) {
-    // ❌ HARD FAIL → PLAYER MUST RELOAD
-    channelSessions.delete(channelId);
+  } catch {
+    // ❌ HARD FAIL → PLAYER AUTO RELOAD
     res.status(502).end();
   }
 });
 
 // =========================
-// START SERVER
+// START
 // =========================
 app.listen(PORT, () => {
-  console.log(`🚀 FAST-ROTATION proxy running on port ${PORT}`);
+  console.log(`🚀 Random AuthInfo rotation running on ${PORT}`);
 });
