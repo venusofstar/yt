@@ -49,7 +49,7 @@ function createSession(channelId) {
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
     userSession: Math.floor(Math.random() * 1e15).toString(),
 
-    videoid: `ch0000009099000000${channelId}${Math.floor(
+    ztecid: `ch0000009099000000${channelId}${Math.floor(
       Math.random() * 9000 + 1000
     )}`,
 
@@ -150,7 +150,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
-    `&videoid=${session.videoid}`;
+    `&ztecid=${session.ztecid}`;
 
   try {
     const upstream = await fetchSticky(origin => {
