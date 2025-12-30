@@ -11,26 +11,37 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.raw({ type: "*/*" }));
 
-// =========================
-// KEEP-ALIVE AGENTS
-// =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+/* =========================
+   KEEP-ALIVE AGENTS
+========================= */
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
 
-// =========================
-// ORIGINS
-// =========================
+/* =========================
+   ORIGINS
+========================= */
 const ORIGINS = [
   "http://143.44.136.67:6060",
   "http://136.239.158.18:6610"
 ];
 
-// =========================
-// PER-CHANNEL SESSION
-// =========================
+/* =========================
+   SESSION STATE
+========================= */
 const channelSessions = new Map();
-const segmentCache = new Map(); // simple in-memory cache
+const segmentCache = new Map();
 
+/* =========================
+   SESSION FACTORY
+========================= */
 function createSession(channelId) {
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
@@ -38,7 +49,8 @@ function createSession(channelId) {
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
     userSession: Math.floor(Math.random() * 1e15).toString(),
     ztecid: `ch0000009099000000${channelId}${Math.floor(Math.random() * 9000 + 1000)}`,
-    started: false
+    started: false,
+    lastUsed: Date.now()
   };
 }
 
@@ -46,22 +58,31 @@ function getSession(channelId) {
   if (!channelSessions.has(channelId)) {
     channelSessions.set(channelId, createSession(channelId));
   }
-  return channelSessions.get(channelId);
+  const s = channelSessions.get(channelId);
+  s.lastUsed = Date.now();
+  return s;
 }
 
 function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
 }
 
-// Cleanup every 10 minutes
+/* =========================
+   CLEANUP (SAFE)
+========================= */
 setInterval(() => {
-  channelSessions.clear();
+  const now = Date.now();
+  for (const [k, v] of channelSessions) {
+    if (now - v.lastUsed > 10 * 60 * 1000) {
+      channelSessions.delete(k);
+    }
+  }
   segmentCache.clear();
 }, 10 * 60 * 1000);
 
-// =========================
-// FETCH WITH STICKY ORIGIN + FAILOVER
-// =========================
+/* =========================
+   FETCH (UNCHANGED LOGIC)
+========================= */
 async function fetchSticky(urlBuilder, req, session) {
   for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
     const origin = ORIGINS[session.originIndex];
@@ -82,11 +103,10 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
-
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
+
     } catch (err) {
-      console.warn(`⚠️ Origin failed: ${origin}`, err.message);
       rotateOrigin(session);
       await new Promise(r => setTimeout(r, 100));
     }
@@ -94,14 +114,14 @@ async function fetchSticky(urlBuilder, req, session) {
   throw new Error("All origins failed");
 }
 
-// =========================
-// HOME
-// =========================
+/* =========================
+   HOME
+========================= */
 app.get("/", (_, res) => res.send("Enjoy Your Life"));
 
-// =========================
-// DASH PROXY (MPD + SEGMENTS)
-// =========================
+/* =========================
+   DASH PROXY
+========================= */
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
   const path = req.params[0];
@@ -120,45 +140,41 @@ app.get("/:channelId/*", async (req, res) => {
   }
 
   const authParams =
-    `JITPTrackType=21` +
-    `&JITPDRMType=Widevine` +
-    `&JITPMediaType=DASH` +
-    `&virtualDomain=001.live_hls.zte.com` +
-    `&ispcode=55` +
-    `&ztecid=${session.ztecid}` +
-    `&m4s_min=1` +
+    `JITPTrackType=21&JITPDRMType=Widevine&JITPMediaType=DASH` +
+    `&virtualDomain=001.live_hls.zte.com&ispcode=55` +
+    `&ztecid=${session.ztecid}&m4s_min=1` +
     `&usersessionid=${session.userSession}` +
-    `&NeedJITP=1` +
-    `&isjitp=0` +
+    `&NeedJITP=1&isjitp=0` +
     `&startNumber=${session.startNumber}` +
-    `&filedura=6` +
-    `&IASHttpSessionId=${session.IAS}`;
+    `&filedura=6&IASHttpSessionId=${session.IAS}`;
 
   try {
-    // =========================
-    // Check cache for segments
-    // =========================
+    /* ===== SEGMENT CACHE ===== */
     const cacheKey = `${channelId}-${path}`;
     if (isSegment && segmentCache.has(cacheKey)) {
       const cached = segmentCache.get(cacheKey);
       res.set(cached.headers);
-      return res.send(cached.body);
+      return res.end(cached.body);
     }
 
     const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      return path.includes("?") ? `${base}${path}&${authParams}` : `${base}${path}?${authParams}`;
+      return path.includes("?")
+        ? `${base}${path}&${authParams}`
+        : `${base}${path}?${authParams}`;
     }, req, session);
 
+    /* ===== MPD ===== */
     if (isMPD) {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Rewrite BaseURL to proxy
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
-      mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
+      mpd = mpd.replace(
+        /<MPD([^>]*)>/,
+        `<MPD$1><BaseURL>${proxyBase}</BaseURL>`
+      );
 
-      // Redact sensitive query params
       mpd = mpd
         .replace(/IASHttpSessionId=[^&"]+/g, "IASHttpSessionId=[honortvph]")
         .replace(/usersessionid=[^&"]+/g, "usersessionid=[honortvph]")
@@ -167,13 +183,15 @@ app.get("/:channelId/*", async (req, res) => {
         .replace(/virtualDomain=[^&"]+/g, "virtualDomain=[honortvph]")
         .replace(/ispcode=[^&"]+/g, "ispcode=[honortvph]");
 
-      res.set({ "Content-Type": "application/dash+xml", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+      res.set({
+        "Content-Type": "application/dash+xml",
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*"
+      });
       return res.send(mpd);
     }
 
-    // =========================
-    // Serve segment
-    // =========================
+    /* ===== SEGMENT STREAM (FIXED) ===== */
     const headers = {
       "Content-Type": "video/mp4",
       "Cache-Control": "no-store",
@@ -181,14 +199,20 @@ app.get("/:channelId/*", async (req, res) => {
       "Connection": "keep-alive"
     };
 
+    res.set(headers);
+
     const stream = new PassThrough();
     upstream.body.pipe(stream).pipe(res);
 
-    // Cache segment
     if (isSegment) {
       const chunks = [];
-      upstream.body.on("data", chunk => chunks.push(chunk));
-      upstream.body.on("end", () => segmentCache.set(cacheKey, { headers, body: Buffer.concat(chunks) }));
+      upstream.body.on("data", c => chunks.push(c));
+      upstream.body.on("end", () => {
+        segmentCache.set(cacheKey, {
+          headers,
+          body: Buffer.concat(chunks)
+        });
+      });
     }
 
   } catch (err) {
@@ -197,7 +221,9 @@ app.get("/:channelId/*", async (req, res) => {
   }
 });
 
-// =========================
-// START SERVER
-// =========================
-app.listen(PORT, () => console.log(`✅ Proxy running on port ${PORT}`));
+/* =========================
+   START
+========================= */
+app.listen(PORT, () =>
+  console.log(`✅ DASH proxy running (playable) on port ${PORT}`)
+);
