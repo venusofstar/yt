@@ -3,7 +3,6 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const http = require("http");
 const https = require("https");
-const crypto = require("crypto");
 const { PassThrough } = require("stream");
 
 const app = express();
@@ -36,16 +35,6 @@ const ORIGINS = [
 ];
 
 // =========================
-// AUTHINFO GENERATOR (EXACT FORMAT)
-// Base64 with == padding, only padding URL-encoded -> %3D%3D
-// =========================
-function generateAuthInfo() {
-  // 48 bytes -> base64 length 64 chars -> ends with ==
-  const base64 = crypto.randomBytes(48).toString("base64");
-  return base64.replace(/==$/, "%3D%3D");
-}
-
-// =========================
 // PER-CHANNEL SESSION
 // =========================
 const channelSessions = new Map();
@@ -54,12 +43,13 @@ function createSession(channelId) {
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
 
+    // Base live startNumber (will start counting on playback)
     startNumber: 46489952,
 
-    IAS: "RR" + Date.now() + crypto.randomBytes(4).toString("hex"),
-    userSession: crypto.randomBytes(8).toString("hex"),
+    IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
+    userSession: Math.floor(Math.random() * 1e15).toString(),
 
-    ztecid: `ch0000009099000000${channelId}${Math.floor(
+    videoid: `ch0000009099000000${channelId}${Math.floor(
       Math.random() * 9000 + 1000
     )}`,
 
@@ -104,6 +94,7 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
 
@@ -125,7 +116,7 @@ app.get("/", (_, res) => {
 });
 
 // =========================
-// DASH / HLS PROXY
+// DASH/HLS PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -135,20 +126,22 @@ app.get("/:channelId/*", async (req, res) => {
   const isMPD = path.endsWith(".mpd");
   const isSegment = !isMPD;
 
+  // =========================
+  // START NUMBER LOGIC
+  // =========================
   if (isSegment) {
     if (!session.started) {
       session.started = true;
       console.log(`▶️ Playback started for channel ${channelId}`);
     }
+
+    // filedura = 6 seconds
     session.startNumber += 6;
   }
 
-  // 🔁 AuthInfo auto-generated like session/user IDs
-  const authInfo = generateAuthInfo();
-
   const authParams =
     `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.comvideoid` +
+    `&virtualDomain=001.live_hls.zte.com` +
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
@@ -157,8 +150,7 @@ app.get("/:channelId/*", async (req, res) => {
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
-    `&ztecid=${session.ztecid}` +
-    `&AuthInfo=${authInfo}`;
+    `&videoid=${session.videoid}`;
 
   try {
     const upstream = await fetchSticky(origin => {
@@ -225,7 +217,7 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
     upstream.body.on("error", err => {
-      console.warn("⚠️ Stream error:", err.message);
+      console.warn("⚠️ Stream error, rotating origin...", err.message);
       rotateOrigin(session);
       proxyStream.end();
     });
