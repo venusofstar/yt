@@ -97,7 +97,7 @@ async function fetchSticky(urlBuilder, req, session) {
 // =========================
 // HOME
 // =========================
-app.get("/", (_, res) => res.send("OTT DASH Proxy Running"));
+app.get("/", (_, res) => res.send("Enjoy Your Life"));
 
 // =========================
 // DASH PROXY (MPD + SEGMENTS)
