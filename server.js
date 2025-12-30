@@ -35,6 +35,13 @@ const ORIGINS = [
 ];
 
 // =========================
+// AUTHINFO AUTO ROTATION
+// =========================
+const AUTHINFOS = [
+  "ugyrpPX71bbFBJqAe4f1yE0kOteuCHrsbRMPIQGqpT5BCCDeDIJn9rDuWx8BszuX2OhJ3l8Zgn1E37D56Kc9IQ%3D%3D"
+];
+
+// =========================
 // PER-CHANNEL SESSION
 // =========================
 const channelSessions = new Map();
@@ -42,8 +49,8 @@ const channelSessions = new Map();
 function createSession(channelId) {
   return {
     originIndex: Math.floor(Math.random() * ORIGINS.length),
+    authIndex: Math.floor(Math.random() * AUTHINFOS.length),
 
-    // Base live startNumber (will start counting on playback)
     startNumber: 46489952,
 
     IAS: "RR" + Date.now() + Math.random().toString(36).slice(2, 10),
@@ -66,6 +73,10 @@ function getSession(channelId) {
 
 function rotateOrigin(session) {
   session.originIndex = (session.originIndex + 1) % ORIGINS.length;
+}
+
+function rotateAuthInfo(session) {
+  session.authIndex = (session.authIndex + 1) % AUTHINFOS.length;
 }
 
 // cleanup every 10 minutes
@@ -101,6 +112,7 @@ async function fetchSticky(urlBuilder, req, session) {
     } catch (err) {
       console.error("⚠️ Origin failed:", origin, err.message);
       rotateOrigin(session);
+      rotateAuthInfo(session);
       await new Promise(r => setTimeout(r, 200));
     }
   }
@@ -134,14 +146,14 @@ app.get("/:channelId/*", async (req, res) => {
       session.started = true;
       console.log(`▶️ Playback started for channel ${channelId}`);
     }
-
-    // filedura = 6 seconds
     session.startNumber += 6;
   }
 
+  const authInfo = AUTHINFOS[session.authIndex];
+
   const authParams =
     `JITPDRMType=Widevine` +
-    `&virtualDomain=001.live_hls.zte.com` +
+    `&virtualDomain=001.live_hls.zte.comvideoid` +
     `&m4s_min=1` +
     `&NeedJITP=1` +
     `&isjitp=0` +
@@ -150,7 +162,8 @@ app.get("/:channelId/*", async (req, res) => {
     `&ispcode=55` +
     `&IASHttpSessionId=${session.IAS}` +
     `&usersessionid=${session.userSession}` +
-    `&ztecid=${session.ztecid}`;
+    `&ztecid=${session.ztecid}` +
+    `&AuthInfo=${authInfo}`;
 
   try {
     const upstream = await fetchSticky(origin => {
@@ -200,8 +213,9 @@ app.get("/:channelId/*", async (req, res) => {
 
     const stallTimer = setInterval(() => {
       if (Date.now() - lastChunk > STALL_LIMIT) {
-        console.warn("⚠️ Segment stall detected, rotating origin...");
+        console.warn("⚠️ Segment stall detected, rotating origin & AuthInfo...");
         rotateOrigin(session);
+        rotateAuthInfo(session);
         upstream.body.destroy();
       }
     }, 500);
@@ -217,8 +231,9 @@ app.get("/:channelId/*", async (req, res) => {
     });
 
     upstream.body.on("error", err => {
-      console.warn("⚠️ Stream error, rotating origin...", err.message);
+      console.warn("⚠️ Stream error, rotating origin & AuthInfo...", err.message);
       rotateOrigin(session);
+      rotateAuthInfo(session);
       proxyStream.end();
     });
 
