@@ -123,7 +123,7 @@ app.get("/:channelId/*", async (req, res) => {
   }
 
   if (isSegment) {
-    session.startNumber += 6;
+    session.startNumber += 1;
   }
 
   const authParams =
