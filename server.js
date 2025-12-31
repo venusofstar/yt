@@ -14,8 +14,16 @@ app.use(express.raw({ type: "*/*" }));
 // =========================
 // KEEP-ALIVE AGENTS
 // =========================
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200, keepAliveMsecs: 30000 });
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 200,
+  keepAliveMsecs: 30000
+});
 
 // =========================
 // ORIGINS
@@ -28,7 +36,7 @@ const ORIGINS = [
 // PER-CHANNEL SESSION
 // =========================
 const channelSessions = new Map();
-const segmentCache = new Map(); // simple in-memory cache
+const segmentCache = new Map();
 
 function createSession(channelId) {
   return {
@@ -59,7 +67,29 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 // =========================
-// FETCH WITH STICKY ORIGIN + FAILOVER
+// EXTRA QUERY (ADDED)
+// =========================
+const EXTRA_QUERY =
+  `AuthInfo=Tajaqa%2FdPohvabxHbYUVrZLZDsxmxbufdpmz6ykZVY6w65FFCygtQMRRIUPF0xuXe9OnZTxGvJPcGpQT0Y5Pwg%3D%3D` +
+  `&version=v1.0` +
+  `&BreakPoint=0` +
+  `&virtualDomain=001.live_hls.zte.com` +
+  `&programid=ch00000000000000001694` +
+  `&contentid=ch00000000000000001694` +
+  `&videoid=ch00000090990000001286` +
+  `&recommendtype=0` +
+  `&userid=1878702116443` +
+  `&boid=001` +
+  `&stbid=02:00:00:00:00:00` +
+  `&terminalflag=1` +
+  `&profilecode=` +
+  `&usersessionid=1013243321` +
+  `&NeedJITP=1` +
+  `&JITPMediaType=DASH` +
+  `&JITPDRMType=NO`;
+
+// =========================
+// FETCH WITH STICKY ORIGIN
 // =========================
 async function fetchSticky(urlBuilder, req, session) {
   for (let attempt = 0; attempt < ORIGINS.length; attempt++) {
@@ -81,7 +111,6 @@ async function fetchSticky(urlBuilder, req, session) {
       });
 
       clearTimeout(timeout);
-
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res;
     } catch (err) {
@@ -99,7 +128,7 @@ async function fetchSticky(urlBuilder, req, session) {
 app.get("/", (_, res) => res.send("Enjoy Your Life"));
 
 // =========================
-// DASH PROXY (MPD + SEGMENTS)
+// DASH PROXY
 // =========================
 app.get("/:channelId/*", async (req, res) => {
   const { channelId } = req.params;
@@ -131,12 +160,10 @@ app.get("/:channelId/*", async (req, res) => {
     `&isjitp=0` +
     `&startNumber=${session.startNumber}` +
     `&filedura=6` +
-    `&IASHttpSessionId=${session.IAS}`;
+    `&IASHttpSessionId=${session.IAS}` +
+    `&${EXTRA_QUERY}`;
 
   try {
-    // =========================
-    // Check cache for segments
-    // =========================
     const cacheKey = `${channelId}-${path}`;
     if (isSegment && segmentCache.has(cacheKey)) {
       const cached = segmentCache.get(cacheKey);
@@ -146,48 +173,52 @@ app.get("/:channelId/*", async (req, res) => {
 
     const upstream = await fetchSticky(origin => {
       const base = `${origin}/001/2/ch0000009099000000${channelId}/`;
-      return path.includes("?") ? `${base}${path}&${authParams}` : `${base}${path}?${authParams}`;
+      return path.includes("?")
+        ? `${base}${path}&${authParams}`
+        : `${base}${path}?${authParams}`;
     }, req, session);
 
     if (isMPD) {
       let mpd = await upstream.text();
       const proxyBase = `${req.protocol}://${req.get("host")}/${channelId}/`;
 
-      // Rewrite BaseURL to proxy
       mpd = mpd.replace(/<BaseURL>.*?<\/BaseURL>/gs, "");
       mpd = mpd.replace(/<MPD([^>]*)>/, `<MPD$1><BaseURL>${proxyBase}</BaseURL>`);
 
-      // Redact sensitive query params
       mpd = mpd
-        .replace(/IASHttpSessionId=[^&"]+/g, "IASHttpSessionId=[honortvph]")
-        .replace(/usersessionid=[^&"]+/g, "usersessionid=[honortvph]")
-        .replace(/ztecid=[^&"]+/g, "ztecid=[honortvph]")
-        .replace(/startNumber=[^&"]+/g, "startNumber=[honortvph]")
-        .replace(/virtualDomain=[^&"]+/g, "virtualDomain=[honortvph]")
-        .replace(/ispcode=[^&"]+/g, "ispcode=[honortvph]");
+        .replace(/IASHttpSessionId=[^&"]+/g, "IASHttpSessionId=[redacted]")
+        .replace(/usersessionid=[^&"]+/g, "usersessionid=[redacted]")
+        .replace(/ztecid=[^&"]+/g, "ztecid=[redacted]")
+        .replace(/startNumber=[^&"]+/g, "startNumber=[redacted]");
 
-      res.set({ "Content-Type": "application/dash+xml", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+      res.set({
+        "Content-Type": "application/dash+xml",
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*"
+      });
       return res.send(mpd);
     }
 
-    // =========================
-    // Serve segment
-    // =========================
     const headers = {
       "Content-Type": "video/mp4",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "Connection": "keep-alive"
     };
+    res.set(headers);
 
     const stream = new PassThrough();
     upstream.body.pipe(stream).pipe(res);
 
-    // Cache segment
     if (isSegment) {
       const chunks = [];
-      upstream.body.on("data", chunk => chunks.push(chunk));
-      upstream.body.on("end", () => segmentCache.set(cacheKey, { headers, body: Buffer.concat(chunks) }));
+      upstream.body.on("data", c => chunks.push(c));
+      upstream.body.on("end", () => {
+        segmentCache.set(cacheKey, {
+          headers,
+          body: Buffer.concat(chunks)
+        });
+      });
     }
 
   } catch (err) {
@@ -199,4 +230,6 @@ app.get("/:channelId/*", async (req, res) => {
 // =========================
 // START SERVER
 // =========================
-app.listen(PORT, () => console.log(`✅ Proxy running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`✅ Proxy running on port ${PORT}`)
+);
