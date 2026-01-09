@@ -1,4 +1,13 @@
 #EXTM3U
+#KODIPROP:inputstream.adaptive.license_type=clearkey
+#KODIPROP:inputstream.adaptive.license_key=561507dbe446370dab37da9c413c0c8b:44d99ada762aeb6c795e2758f6acc552
+#EXTINF:-1 tvg-id="KAPAMYILACH" tvg-logo="https://www.gsat.asia/images/channels/channel_logos/012_kapamilyachannel.webp" group-title="GSAT", KAPAMILYA
+https://tv.gsatmaruya.dpdns.org/live/key/kapamilya/index.mpd
+
+#KODIPROP:inputstream.adaptive.license_type=clearkey
+#KODIPROP:inputstream.adaptive.license_key=4a062cc7fb963f7581e0f7d993fab072:df793422c53007e8baae60237fb419c9
+#EXTINF:-1 tvg-id="UNTV" tvg-logo="https://www.gsat.asia/images/channels/channel_logos/011_untv.webp" group-title="GSAT", UNTV
+https://tv.gsatmaruya.dpdns.org/live/key/untv/index.mpd
 #KODIPROP:inputstream.adaptive.manifest_type=mpd
 #KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey
 #KODIPROP:inputstream.adaptive.license_key=31363231383437343631323030313134:614762653768324e676a6b3577434733
