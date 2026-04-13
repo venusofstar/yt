@@ -1,24 +1,19 @@
 {
-  "name": "dash-streaming-proxy",
+  "name": "iptv-restream-server",
   "version": "1.0.0",
-  "description": "Fast DASH MPD + segment proxy with session pinning and origin rotation",
+  "description": "DASH/HLS IPTV restream proxy server with origin rotation and MPD support",
   "main": "server.js",
   "scripts": {
-    "start": "NODE_ENV=production node server.js",
+    "start": "node server.js",
     "dev": "node server.js"
   },
-  "keywords": [
-    "DASH",
-    "MPD",
-    "streaming",
-    "proxy",
-    "nodejs"
-  ],
-  "author": "Your Name",
-  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "node-fetch": "^2.6.12"
-  }
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT"
 }
