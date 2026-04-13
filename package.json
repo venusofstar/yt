@@ -1,19 +1,10 @@
 {
-  "name": "iptv-restream-server",
+  "name": "mpd-restream-proxy",
   "version": "1.0.0",
-  "description": "DASH/HLS IPTV restream proxy server with origin rotation and MPD support",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
-  },
+  "type": "commonjs",
   "dependencies": {
-    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-fetch": "^2.7.0"
-  },
-  "engines": {
-    "node": ">=16"
-  },
-  "license": "MIT"
+    "node-fetch": "^2.6.7"
+  }
 }
