@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 // UPSTREAM DASH STREAM
 // =======================
 const UPSTREAM =
-  "https://cdn-ue1-prod.tsv2.amagi.tv/linear/amg01006-abs-cbn-kapcha-dash-abscbnono/ea9b1903-75d6-490a-95cf-0fc3f3165ba3/index.mpd";
+  "https://cdn-ue1-prod.tsv2.amagi.tv/linear/amg01006-abs-cbn-kapcha-dash-abscbnono/index.mpd";
 
 // =======================
 // HEADERS (IMPORTANT)
