@@ -13,8 +13,8 @@ const UPSTREAM =
 const HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-  Referer: "https://www.google.com/",
-  Origin: "https://www.google.com",
+  Referer: "https://www.iwanttfc.com/",
+  Origin: "https://www.iwanttfc.com",
 };
 
 // Serve proxied MPD
