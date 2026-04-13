@@ -1,18 +1,13 @@
 const express = require("express");
 const fetch = require("node-fetch");
-const app = express();
+const { URL } = require("url");
 
+const app = express();
 const PORT = process.env.PORT || 3000;
 
-// =======================
-// UPSTREAM DASH STREAM
-// =======================
 const UPSTREAM =
-  "https://cdn-ue1-prod.tsv2.amagi.tv/linear/amg01006-abs-cbn-kapcha-dash-abscbnono/index.mpd";
+  "https://cdn-ue1-prod.tsv2.amagi.tv/linear/amg01006-abs-cbn-kapcha-dash-abscbnono/ea9b1903-75d6-490a-95cf-0fc3f3165ba3/index.mpd";
 
-// =======================
-// HEADERS (IMPORTANT)
-// =======================
 const HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -22,9 +17,33 @@ const HEADERS = {
   Connection: "keep-alive",
 };
 
-// =======================
-// MANIFEST PROXY
-// =======================
+// CORS for all players / web apps
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+function makeProxyUrl(req, targetUrl) {
+  return `${req.protocol}://${req.get("host")}/proxy?url=${encodeURIComponent(
+    targetUrl
+  )}`;
+}
+
+// Resolve relative URLs safely
+function resolveUrl(base, relative) {
+  try {
+    return new URL(relative, base).toString();
+  } catch {
+    return relative;
+  }
+}
+
+// =========================
+// UNIVERSAL MPD PROXY
+// =========================
 app.get("/manifest.mpd", async (req, res) => {
   try {
     const response = await fetch(UPSTREAM, { headers: HEADERS });
@@ -34,30 +53,29 @@ app.get("/manifest.mpd", async (req, res) => {
     }
 
     let mpd = await response.text();
+    const upstreamBase = UPSTREAM.substring(0, UPSTREAM.lastIndexOf("/") + 1);
 
-    // =========================
-    // BASEURL FOR RESTREAMING
-    // =========================
-    const baseUrl = `${req.protocol}://${req.get("host")}/segment?url=`;
-
-    // 1. Replace existing BaseURL
+    // Replace existing BaseURL with proxy URL
     mpd = mpd.replace(
-      /<BaseURL>.*?<\/BaseURL>/g,
-      `<BaseURL>${baseUrl}</BaseURL>`
+      /<BaseURL>(.*?)<\/BaseURL>/g,
+      (_, path) => {
+        const full = resolveUrl(upstreamBase, path);
+        return `<BaseURL>${makeProxyUrl(req, full)}</BaseURL>`;
+      }
     );
 
-    // 2. Inject BaseURL if missing
-    if (!mpd.includes("<BaseURL>")) {
+    // Inject BaseURL if missing
+    if (!/<BaseURL>/.test(mpd)) {
       mpd = mpd.replace(
         /<MPD[^>]*>/,
-        (match) => `${match}\n<BaseURL>${baseUrl}</BaseURL>`
+        (m) => `${m}\n<BaseURL>${makeProxyUrl(req, upstreamBase)}</BaseURL>`
       );
     }
 
-    // 3. Rewrite absolute segment URLs safely
+    // Rewrite absolute URLs inside MPD
     mpd = mpd.replace(
-      /(https?:\/\/[^\s"']+\.(m4s|mp4)(\?[^\s"']*)?)/g,
-      (url) => `${baseUrl}${encodeURIComponent(url)}`
+      /(https?:\/\/[^\s"'<]+)/g,
+      (url) => makeProxyUrl(req, url)
     );
 
     res.setHeader("Content-Type", "application/dash+xml");
@@ -69,53 +87,53 @@ app.get("/manifest.mpd", async (req, res) => {
   }
 });
 
-// =======================
-// SEGMENT PROXY
-// =======================
-app.get("/segment", async (req, res) => {
+// =========================
+// UNIVERSAL SEGMENT / FILE PROXY
+// =========================
+async function proxyHandler(req, res) {
   try {
-    const url = decodeURIComponent(req.query.url || "");
-
-    if (!url) return res.status(400).send("Missing segment URL");
+    const url = req.query.url;
+    if (!url) return res.status(400).send("Missing URL");
 
     const headers = { ...HEADERS };
 
-    // Range support (critical for DASH)
-    if (req.headers.range) {
-      headers.Range = req.headers.range;
-    }
+    if (req.headers.range) headers.Range = req.headers.range;
 
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, {
+      method: req.method,
+      headers,
+    });
 
     res.status(response.status);
 
-    // Stream headers safely
     response.headers.forEach((value, key) => {
       const k = key.toLowerCase();
-      if (
-        !["content-encoding", "transfer-encoding", "content-length"].includes(k)
-      ) {
+      if (!["content-encoding", "transfer-encoding"].includes(k)) {
         res.setHeader(key, value);
       }
     });
 
-    // Direct pipe (low latency restream)
+    if (req.method === "HEAD") {
+      return res.end();
+    }
+
     response.body.pipe(res);
   } catch (err) {
-    console.error("Segment Error:", err.message);
-    res.status(500).send("Segment proxy error");
+    console.error("Proxy Error:", err.message);
+    res.status(500).send("Proxy error");
   }
-});
+}
 
-// =======================
-// HEALTH CHECK
-// =======================
+app.get("/proxy", proxyHandler);
+app.head("/proxy", proxyHandler);
+
+// =========================
+// HEALTH
+// =========================
 app.get("/", (req, res) => {
-  res.send("🚀 DASH Restream Proxy is Running");
+  res.send("Universal DASH Proxy Running");
 });
 
-// =======================
 app.listen(PORT, () => {
-  console.log("🔥 MPD Restream ready on port " + PORT);
-  console.log(`👉 Manifest: http://localhost:${PORT}/manifest.mpd`);
+  console.log(`🚀 DASH proxy ready: http://localhost:${PORT}/manifest.mpd`);
 });
