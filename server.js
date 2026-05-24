@@ -19,9 +19,9 @@ app.get("/proxy", async (req, res) => {
         "User-Agent":
           "Mozilla/5.0",
         "Origin":
-          "https://watch.example.com",
+          "https://www.peacocktv.com",
         "Referer":
-          "https://watch.example.com/"
+          "https://www.peacocktv.com/"
       }
     });
 
