@@ -1,142 +1,125 @@
-
-import express from "express";
-import { exec } from "child_process";
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-// ===== CACHE SYSTEM =====
-const cache = new Map();
-const CACHE_TIME = 5 * 60 * 1000; // 5 minutes
+app.use(cors());
 
-// ===== EXTRACT YOUTUBE STREAM =====
-function extractStreams(videoId) {
-  return new Promise((resolve, reject) => {
-    const url = `https://www.youtube.com/watch?v=${videoId}`;
+// =========================
+// SECRET KEY
+// =========================
+const SECRET = "MAFLIX_SUPER_SECRET_KEY";
 
-    exec(`yt-dlp -g ${url}`, (err, stdout, stderr) => {
-      if (err || !stdout) {
-        console.error("yt-dlp error:", stderr);
-        return reject("Extraction failed");
-      }
-
-      const links = stdout.trim().split("\n");
-
-      resolve({
-        video: links[0] || null,
-        audio: links[1] || null
-      });
-    });
-  });
+// =========================
+// CREATE TOKEN
+// =========================
+function createToken(userId) {
+  return jwt.sign(
+    {
+      userId,
+      accountExpired: false,
+      allowedOrigins: ["https://*"],
+    },
+    SECRET,
+    {
+      expiresIn: "60d",
+    }
+  );
 }
 
-// ===== API: GET STREAM =====
-app.get("/yt/:id", async (req, res) => {
-  const videoId = req.params.id;
+// =========================
+// VERIFY TOKEN
+// =========================
+function verifyToken(req, res, next) {
+  const token = req.query.token;
 
-  try {
-    // check cache
-    if (cache.has(videoId)) {
-      const cached = cache.get(videoId);
-
-      if (Date.now() - cached.time < CACHE_TIME) {
-        return res.json({
-          source: "cache",
-          videoId,
-          ...cached.data
-        });
-      }
-    }
-
-    // extract fresh
-    const data = await extractStreams(videoId);
-
-    // save cache
-    cache.set(videoId, {
-      data,
-      time: Date.now()
+  if (!token) {
+    return res.status(401).json({
+      error: "Missing token",
     });
-
-    res.json({
-      source: "fresh",
-      videoId,
-      ...data
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: "Failed to extract stream" });
-  }
-});
-
-// ===== PROXY (for video/audio or m3u8 if available) =====
-app.get("/proxy", async (req, res) => {
-  const target = req.query.url;
-
-  if (!target) {
-    return res.status(400).send("Missing url");
   }
 
   try {
-    const response = await fetch(target, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.youtube.com/"
-      }
-    });
-
-    res.setHeader("Access-Control-Allow-Origin", "*");
-
-    // detect content type
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("mpegurl")) {
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    } else {
-      res.setHeader("Content-Type", contentType);
-    }
-
-    response.body.pipe(res);
-
+    const decoded = jwt.verify(token, SECRET);
+    req.user = decoded;
+    next();
   } catch (err) {
-    res.status(500).send("Proxy error");
+    return res.status(403).json({
+      error: "Invalid or expired token",
+    });
   }
+}
+
+// =========================
+// GENERATE TEST TOKEN
+// =========================
+app.get("/generate-token", (req, res) => {
+  const token = createToken("PHCORNER");
+
+  res.json({
+    token,
+  });
 });
 
-// ===== SIMPLE PLAYER TEST PAGE =====
-app.get("/play/:id", (req, res) => {
-  const videoId = req.params.id;
+// =========================
+// SECURE LOGO ENDPOINT
+// =========================
+app.get("/api/logo/:id", verifyToken, (req, res) => {
+  const { id } = req.params;
+  const format = req.query.format || "png";
 
-  res.send(`
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>Player</title>
-    <style>
-      body { margin:0; background:black; }
-      video { width:100vw; height:100vh; }
-    </style>
-  </head>
-  <body>
-    <video id="video" controls autoplay></video>
+  // Example local file
+  const logoPath = path.join(__dirname, "logos", `${id}.${format}`);
 
-    <script>
-      fetch('/yt/${videoId}')
-        .then(res => res.json())
-        .then(data => {
-          const video = document.getElementById('video');
-          video.src = '/proxy?url=' + encodeURIComponent(data.video);
-        });
-    </script>
-  </body>
-  </html>
-  `);
+  if (!fs.existsSync(logoPath)) {
+    return res.status(404).send("Logo not found");
+  }
+
+  res.sendFile(logoPath);
 });
 
-// ===== ROOT =====
+// =========================
+// SECURE PLAYLIST ENDPOINT
+// =========================
+app.get(
+  "/api/playlist/:id/playlist.m3u8",
+  verifyToken,
+  (req, res) => {
+    const { id } = req.params;
+
+    // Real stream URL
+    const realStream =
+      "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+
+    // Optional: dynamic playlist
+    const playlist = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=2000000
+${realStream}`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.apple.mpegurl"
+    );
+
+    res.send(playlist);
+  }
+);
+
+// =========================
+// HOME
+// =========================
 app.get("/", (req, res) => {
-  res.send("YouTube Stream API is running");
+  res.send("JWT Secure HLS Server Running");
 });
 
-// ===== START SERVER =====
+// =========================
+// START SERVER
+// =========================
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+  console.log(`Server running on port ${PORT}`);
 });
