@@ -1,26 +1,16 @@
 {
-  "name": "maflix-secure-hls",
+  "name": "us-stream-proxy",
   "version": "1.0.0",
-  "description": "JWT Secure HLS Streaming Server",
+  "description": "Geo proxy for DASH/HLS streams",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
-  "keywords": [
-    "hls",
-    "jwt",
-    "streaming",
-    "m3u8",
-    "express",
-    "secure-stream"
-  ],
-  "author": "MAFLIX",
-  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^16.5.0",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2"
+    "https-proxy-agent": "^7.0.6",
+    "node-fetch": "^2.7.0"
   }
 }
