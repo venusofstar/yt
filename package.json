@@ -1,12 +1,26 @@
 {
-  "name": "yt-m3u8-api",
+  "name": "maflix-secure-hls",
   "version": "1.0.0",
+  "description": "JWT Secure HLS Streaming Server",
   "main": "server.js",
-  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
+  "keywords": [
+    "hls",
+    "jwt",
+    "streaming",
+    "m3u8",
+    "express",
+    "secure-stream"
+  ],
+  "author": "MAFLIX",
+  "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2"
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2"
   }
 }
