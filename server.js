@@ -1,43 +1,88 @@
 const express = require("express");
-const fetch = require("node-fetch");
-const { HttpsProxyAgent } = require("https-proxy-agent");
-
+const axios = require("axios");
+const cors = require("cors");
 const app = express();
 
-const US_PROXY =
-  "http://162.253.68.97:4145";
+const PORT = process.env.PORT || 3000;
 
-const agent = new HttpsProxyAgent(US_PROXY);
+app.use(cors());
 
+// 🔥 Your required headers
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
+  "Accept": "*/*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Referer": "https://kisskh.id/",
+  "Origin": "https://kisskh.id"
+};
+
+/**
+ * 🔥 MAIN PROXY ROUTE
+ * Usage:
+ * /proxy?url=https://example.com/master.m3u8
+ */
 app.get("/proxy", async (req, res) => {
   try {
     const url = req.query.url;
 
-    const response = await fetch(url, {
-      agent,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0",
-        "Origin":
-          "https://www.peacocktv.com",
-        "Referer":
-          "https://www.peacocktv.com/"
-      }
+    if (!url) {
+      return res.status(400).send("Missing ?url=");
+    }
+
+    const response = await axios.get(url, {
+      responseType: "stream",
+      headers: HEADERS,
+      timeout: 15000
     });
 
-    const contentType =
-      response.headers.get("content-type");
-
+    // Forward content-type (important for HLS)
     res.setHeader(
       "Content-Type",
-      contentType
+      response.headers["content-type"] || "application/vnd.apple.mpegurl"
     );
 
-    response.body.pipe(res);
+    // Allow browser access
+    res.setHeader("Access-Control-Allow-Origin", "*");
 
-  } catch (e) {
-    res.status(500).send(e.toString());
+    // Pipe stream
+    response.data.pipe(res);
+
+  } catch (err) {
+    console.error("Proxy error:", err.message);
+    res.status(500).send("Stream fetch failed");
   }
 });
 
-app.listen(3000);
+/**
+ * 🔥 OPTIONAL: TS SEGMENT PROXY
+ * Needed if .m3u8 points to ts files that are also blocked
+ */
+app.get("/ts", async (req, res) => {
+  try {
+    const url = req.query.url;
+
+    if (!url) {
+      return res.status(400).send("Missing ?url=");
+    }
+
+    const response = await axios.get(url, {
+      responseType: "stream",
+      headers: HEADERS,
+      timeout: 15000
+    });
+
+    res.setHeader("Content-Type", "video/mp2t");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    response.data.pipe(res);
+
+  } catch (err) {
+    console.error("TS error:", err.message);
+    res.status(500).send("TS fetch failed");
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🔥 HLS Proxy running on http://localhost:${PORT}`);
+});
